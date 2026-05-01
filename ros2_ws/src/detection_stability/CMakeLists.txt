@@ -15,6 +15,7 @@ find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+fing_package(tf2_geomestry_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 
 add_executable(detection_stability_node src/detection_stability_node.cpp)
