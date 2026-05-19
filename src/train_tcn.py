@@ -1,12 +1,12 @@
 """
-Train TCN on 5-class skeleton dataset.
+Train TCN on 6-class skeleton dataset.
 
 Classes:
-    0: idle, 1: waving, 2: hands_up_single, 3: hands_up_both, 4: pointing
+    0: idle, 1: waving, 2: hands_up_single, 3: hands_up_both, 4: pointing, 5: stop
 
 Usage:
     python src/train_tcn.py
-    python src/train_tcn.py --pkl merged_5class.pkl --split xsub --epochs 150
+    python src/train_tcn.py --pkl wholebody_6class.pkl --split xsub --epochs 150
     python src/train_tcn.py --split xset --max_frames 100
 """
 
@@ -30,8 +30,8 @@ from models.tcn import TCN
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train TCN on NTU skeleton data")
-    parser.add_argument("--pkl", type=str, default="wholebody_5class.pkl",
-                        help="Path to wholebody 5-class pkl file")
+    parser.add_argument("--pkl", type=str, default="wholebody_6class.pkl",
+                        help="Path to wholebody skeleton pkl file")
     parser.add_argument("--split", type=str, default="xsub",
                         choices=["xsub", "xview", "xset"],
                         help="Split protocol: xsub (cross-subject), xview (cross-view, NTU-60), xset (cross-setup, NTU-120)")

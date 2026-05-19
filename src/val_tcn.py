@@ -79,7 +79,7 @@ def main():
     print(f"Loading model: {model_path}")
     checkpoint = torch.load(model_path, map_location=device, weights_only=True)
 
-    input_dim = checkpoint.get("input_dim", 34)
+    input_dim = checkpoint.get("input_dim", 130)
     num_classes = checkpoint.get("num_classes", 5)
     hidden_dims = checkpoint.get("hidden_dims", [64, 128, 128, 256])
     kernel_size = checkpoint.get("kernel_size", 5)

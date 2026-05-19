@@ -42,6 +42,7 @@ rtmlib Wholebody(133 keypoints) → 스켈레톤 추출 → 학습 → 실시간
 | 2 | hands_up_single | 커스텀 수집 |
 | 3 | hands_up_both | 커스텀 수집 |
 | 4 | pointing | 커스텀 수집 |
+| 5 | stop | 커스텀 수집 |
 
 ---
 
@@ -112,40 +113,114 @@ TCN 입력: `(batch, 130, T)` — 65 joints × 2 coords, T = 시퀀스 길이
 
 ## 사용법
 
+전체 파이프라인은 **수집 → 추출 → 학습 → 평가 → 추론** 5단계.
+
+```
+[비디오 클립 .avi]  →  [스켈레톤 .pkl]  →  [학습 .pth]  →  [실시간 추론]
+  data/dataset/         wholebody_6class.pkl   models/best_tcn_xsub.pth
+```
+
+### 0. 환경
+
+```bash
+conda create -n pgr python=3.10 -y
+conda activate pgr
+pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
+pip install opencv-python tqdm onnxruntime-gpu numpy
+```
+
+저장소 루트의 [rtmlib/](rtmlib/)를 그대로 사용 (sys.path로 자동 import).
+
 ### 1. 데이터 준비
 
-#### 커스텀 비디오 → 65-joint 스켈레톤 추출
+#### 1-a. 디렉토리 배치
 
-```bash
-python extract_wholebody_skeleton.py
+각 클래스 폴더를 **`data/dataset/<class_name>/`** 아래에 두고 그 안에 `.avi`/`.mp4` 비디오 클립을 모음. 폴더명이 곧 라벨이라 오타 주의 (대소문자 구분).
+
+```
+data/dataset/
+├── idle/            ← label 0
+│   ├── clip_000001.avi
+│   └── ...
+├── wave/            ← label 1
+├── hand_up/         ← label 2 (한 손)
+├── hand_up_both/    ← label 3 (양 손)
+├── pointing/        ← label 4
+└── stop/            ← label 5
 ```
 
-`data/dataset/` 아래의 비디오에서 65-joint 스켈레톤을 추출하여 `wholebody_5class.pkl` 생성.
+폴더명 ↔ 라벨 매핑은 [extract_wholebody_skeleton.py#L46-L54](extract_wholebody_skeleton.py#L46-L54) (`FOLDER_TO_LABEL`)에서 정의. 새 클래스를 추가하려면 여기에 항목을 더하고 [data/ntu_dataset.py#L36-L44](data/ntu_dataset.py#L36-L44)의 `NTU_ACTION_NAMES`에도 같은 라벨을 추가.
 
-#### NTU-120 subset 추출 (선택)
+#### 1-b. 클립 녹화 방법
+
+> TODO: 별도 영상 녹화 스크립트 추가 예정 (위치만 명시) — [src/collect_data.py](src/collect_data.py)는 웹캠에서 스켈레톤(.pkl)을 바로 수집하는 도구이며, **이 프로젝트는 .avi 영상을 한 번 거쳐서 추출하는 워크플로우**임.
+
+권장 녹화 가이드:
+- 한 클립당 약 **3~4초** (≈ 90~120 frame @ 30 fps).
+- 해상도 **640×480** 권장 (스크립트 기본값과 매치).
+- 한 사람만 등장하는 게 이상적. 다인원 클립이 섞이면 추출 단계에서 `--person_select largest`로 보정 (아래).
+- 클래스당 **최소 100~300개** 정도 모으면 안정적. (현재 데이터셋: 클래스당 300개)
+
+#### 1-c. 스켈레톤 추출
 
 ```bash
-python extract_ntu_subset.py --src /path/to/ntu120_2d.pkl
-python merge_pkl.py --ntu ntu_5class.pkl --custom wholebody_5class.pkl
+python extract_wholebody_skeleton.py --out wholebody_6class.pkl --person_select largest
 ```
 
-### 2. 학습
-
-#### TCN (Gesture, 5-class)
-
-```bash
-python src/train_tcn.py --pkl wholebody_5class.pkl --split xsub --epochs 100
-```
+- 각 비디오를 프레임 단위로 디코딩 → rtmlib `PoseTracker(Wholebody)`로 133-keypoint 추출 → face 68개 제거 → **(1, T, 65, 2)** + score 텐서로 묶음.
+- 라벨별 **stratified 8:2 train/val split**을 자동 생성 (`xsub_train/xsub_val/xset_train/xset_val` 키 4개 모두 동일 split).
+- 결과물: 프로젝트 루트에 `wholebody_6class.pkl` 1개 파일.
 
 | 옵션 | 기본값 | 설명 |
 |------|--------|------|
-| `--pkl` | `merged_5class.pkl` | 학습 데이터 pkl |
+| `--data_dir` | `data/dataset` | 클래스 폴더가 있는 루트 |
+| `--out` | `wholebody_6class.pkl` | 출력 pkl 경로 |
+| `--person_select` | `largest` | `first` = tracker[0] (단일 인물 시), `largest` = 가장 큰 bbox (다인원 권장), `center` = 화면 중앙에 가까운 사람 |
+| `--score_thr` | 0.3 | `largest`/`center` 측정 시 keypoint 신뢰도 임계값 |
+| `--train_ratio` | 0.8 | train/val split 비율 |
+| `--device` | `cuda` | rtmlib backend device |
+| `--backend` | `onnxruntime` | `onnxruntime` / `opencv` |
+
+RTX 4060 Ti 기준 약 2초/클립, 1800클립이면 약 1시간.
+
+#### 1-d. (선택) NTU-120 subset과 병합
+
+NTU-120 RGB+D의 일부 행동을 추가로 섞고 싶을 때:
+
+```bash
+python extract_ntu_subset.py --src /path/to/ntu120_2d.pkl --out ntu_5class.pkl
+python merge_pkl.py --ntu ntu_5class.pkl --custom wholebody_6class.pkl --out merged.pkl
+```
+
+> 주의: NTU subset은 17-joint(body only)라서 65-joint 커스텀 데이터와 channel 수가 안 맞음. 둘 다 쓰려면 두 데이터 모두 같은 joint 차원으로 맞추는 전처리가 필요.
+
+### 2. 학습
+
+#### TCN (Gesture, 6-class)
+
+```bash
+python src/train_tcn.py --pkl wholebody_6class.pkl --split xsub --epochs 100
+```
+
+- 입력: `(B, 130, T)` — 65 joints × 2 (어깨 중심·어깨 길이로 프레임별 정규화 후 V*C로 flatten)
+- 손실: `CrossEntropyLoss` + 역빈도 class weights
+- 옵티마: AdamW(lr 1e-3, wd 1e-4) + CosineAnnealingLR, gradient clip 1.0
+- Augment: horizontal flip + left/right joint swap, temporal shift, gaussian noise, scale
+- Early stopping: val acc 기준 patience=15
+- 저장 위치: `models/best_tcn_{split}.pth` (체크포인트에 input_dim/num_classes/hidden_dims 등 메타 포함 → 추론 때 자동 복원)
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--pkl` | `wholebody_6class.pkl` | 학습 데이터 pkl |
 | `--split` | `xsub` | 분할 (xsub / xset) |
 | `--epochs` | 100 | 학습 에폭 |
 | `--batch_size` | 32 | 배치 크기 |
 | `--lr` | 1e-3 | 학습률 |
 | `--patience` | 15 | Early stopping |
-| `--max_frames` | 120 | 최대 시퀀스 길이 |
+| `--max_frames` | 120 | 최대 시퀀스 길이 (이보다 길면 uniform sampling, 짧으면 zero-pad + mask) |
+| `--hidden_dims` | 64 128 128 256 | TCN 채널 |
+| `--kernel_size` | 5 | causal conv kernel |
+| `--dropout` | 0.3 |  |
 
 #### MLP (Posture, 3-class)
 
@@ -153,12 +228,16 @@ python src/train_tcn.py --pkl wholebody_5class.pkl --split xsub --epochs 100
 python src/train.py
 ```
 
+POLAR dataset (`data/Annotations/`, `data/ImageSets/`, `data/skeletons/`)이 준비되어 있어야 함.
+
 ### 3. 평가
 
 ```bash
-python src/val_tcn.py --pkl wholebody_5class.pkl --split xsub_val
+python src/val_tcn.py --pkl wholebody_6class.pkl --split xsub_val
 python src/val.py
 ```
+
+각각 confusion matrix와 클래스별 P/R/F1을 출력.
 
 ### 4. 실시간 추론
 
@@ -224,14 +303,18 @@ python src/inference.py skeleton.npy    # .npy 파일 추론
 |sitting|0.8383|0.8879|0.8624|
 |lying|0.7382|0.8446|0.7848|
 
-### Gesture TCN
+### Gesture TCN (6-class, `wholebody_6class.pkl`, split `xsub`)
+
+Best epoch 61 / 76, Val Acc **0.9694** (349 / 360)
+
 ||precision|recall|F1 score|
 |---|---|---|---|
-|idle|1.0|1.0|1.0|
-|waving|1.0|0.9667|0.9831|
-|handup_single|0.9661|0.9500|0.9580|
-|handup_both|0.9836|1.0|0.9917|
-|pointing|0.9677|1.0|0.9836|
+|idle|0.9833|0.9833|0.9833|
+|waving|0.9500|0.9500|0.9500|
+|hands_up_single|0.9492|0.9333|0.9412|
+|hands_up_both|1.0000|1.0000|1.0000|
+|pointing|0.9355|0.9667|0.9508|
+|stop|1.0000|0.9833|0.9916|
 
 
 

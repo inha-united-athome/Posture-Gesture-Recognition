@@ -16,18 +16,19 @@ Class mapping (from folder name):
     hand_up       → 2  (hands_up_single)
     hand_up_both  → 3  (hands_up_both)
     pointing      → 4
+    stop          → 5
 
 PKL format (same as NTU):
     annotations[i]:
         - "frame_dir": str
-        - "label": int (0~4)
+        - "label": int (0~5)
         - "total_frames": int
         - "keypoint": np.ndarray (1, T, 65, 2)
         - "keypoint_score": np.ndarray (1, T, 65)
 
 Usage:
     python extract_wholebody_skeleton.py
-    python extract_wholebody_skeleton.py --out wholebody_5class.pkl
+    python extract_wholebody_skeleton.py --out wholebody_6class.pkl
     python extract_wholebody_skeleton.py --device cpu --backend opencv
 """
 
@@ -48,6 +49,7 @@ FOLDER_TO_LABEL = {
     "hand_up": 2,
     "hand_up_both": 3,
     "pointing": 4,
+    "stop": 5,
 }
 
 LABEL_TO_NAME = {
@@ -56,6 +58,7 @@ LABEL_TO_NAME = {
     2: "hands_up_single",
     3: "hands_up_both",
     4: "pointing",
+    5: "stop",
 }
 
 # RTMPose 133 → 65 joints (face 제거)
@@ -69,15 +72,24 @@ def parse_args():
         description="Extract wholebody skeletons (65 joints, no face) from custom videos"
     )
     parser.add_argument("--rtmlib_path", type=str,
-                        default="/home/gw/robocup_ws/src/rtmlib")
+                        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "rtmlib"))
     parser.add_argument("--data_dir", type=str,
-                        default="/home/gw/robocup_ws/src/Learning/data/dataset")
-    parser.add_argument("--out", type=str, default="wholebody_5class.pkl")
+                        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "dataset"))
+    parser.add_argument("--out", type=str, default="wholebody_6class.pkl")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--backend", type=str, default="onnxruntime")
     parser.add_argument("--train_ratio", type=float, default=0.8,
                         help="Train/val split ratio")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--person_select", type=str, default="largest",
+                        choices=["first", "largest", "center"],
+                        help="Person to use when multiple are detected per frame: "
+                             "'first' = keypoints[0] (tracker order), "
+                             "'largest' = biggest bbox (recommended for crowd clips), "
+                             "'center' = closest to frame center")
+    parser.add_argument("--score_thr", type=float, default=0.3,
+                        help="Per-keypoint score threshold used when measuring bbox "
+                             "for --person_select largest/center")
     return parser.parse_args()
 
 
@@ -96,7 +108,56 @@ def init_pose_tracker(rtmlib_path, device, backend):
     return tracker
 
 
-def extract_video_skeleton(video_path, tracker):
+def _select_person_idx(keypoints, scores, mode, score_thr, frame_wh):
+    """
+    Choose which detected person to use for this frame.
+
+    keypoints: (N, 133, 2) — N detected persons
+    scores:    (N, 133)    — raw rtmlib logits (sigmoid applied for thresholding)
+    mode:      "first" | "largest" | "center"
+    Returns: index in [0, N)
+    """
+    N = len(keypoints)
+    if N == 1 or mode == "first":
+        return 0
+
+    # sigmoid for thresholding only
+    sc_prob = 1.0 / (1.0 + np.exp(-scores.astype(np.float32)))
+
+    best_idx = 0
+    best_score = -np.inf
+    fw, fh = frame_wh
+    cx_frame, cy_frame = fw / 2.0, fh / 2.0
+
+    for i in range(N):
+        valid = sc_prob[i] > score_thr
+        if valid.sum() < 4:
+            # Too few confident joints — fall back to all
+            kp_i = keypoints[i]
+        else:
+            kp_i = keypoints[i][valid]
+
+        x_min, y_min = kp_i.min(axis=0)
+        x_max, y_max = kp_i.max(axis=0)
+        w = max(x_max - x_min, 1.0)
+        h = max(y_max - y_min, 1.0)
+
+        if mode == "largest":
+            metric = w * h
+        else:  # "center"
+            cx = (x_min + x_max) / 2.0
+            cy = (y_min + y_max) / 2.0
+            dist = ((cx - cx_frame) ** 2 + (cy - cy_frame) ** 2) ** 0.5
+            metric = -dist  # smaller distance = better
+
+        if metric > best_score:
+            best_score = metric
+            best_idx = i
+
+    return best_idx
+
+
+def extract_video_skeleton(video_path, tracker, person_select="first", score_thr=0.3):
     """
     Extract 65-joint keypoints (no face) from every frame of a video.
 
@@ -108,6 +169,9 @@ def extract_video_skeleton(video_path, tracker):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return None, None, 0
+
+    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
 
     all_kp = []
     all_sc = []
@@ -124,9 +188,12 @@ def extract_video_skeleton(video_path, tracker):
             kp_frame = np.zeros((NUM_JOINTS, 2), dtype=np.float32)
             sc_frame = np.zeros((NUM_JOINTS,), dtype=np.float32)
         else:
-            # Take first person, extract 65 joints (remove face)
-            kp_133 = keypoints[0].astype(np.float32)   # (133, 2)
-            sc_133 = scores[0].astype(np.float32)       # (133,)
+            kps = np.asarray(keypoints, dtype=np.float32)   # (N, 133, 2)
+            scs = np.asarray(scores, dtype=np.float32)       # (N, 133)
+            pidx = _select_person_idx(kps, scs, person_select, score_thr, (fw, fh))
+
+            kp_133 = kps[pidx]   # (133, 2)
+            sc_133 = scs[pidx]   # (133,)
 
             kp_frame = kp_133[KEEP_IDXS]   # (65, 2)
             sc_frame = sc_133[KEEP_IDXS]   # (65,)
@@ -203,6 +270,7 @@ def main():
     print(f"  Output:     {args.out}")
     print(f"  Device:     {args.device}")
     print(f"  Backend:    {args.backend}")
+    print(f"  Person sel: {args.person_select} (score_thr={args.score_thr})")
     print()
 
     # ===== Collect videos =====
@@ -220,10 +288,14 @@ def main():
 
     # ===== Extract skeletons =====
     annotations = []
-    label_counts = {i: 0 for i in range(5)}
+    label_counts = {i: 0 for i in range(len(LABEL_TO_NAME))}
 
     for video_path, label, frame_dir in tqdm(video_list, desc="Extracting"):
-        kp, sc, total_frames = extract_video_skeleton(video_path, tracker)
+        kp, sc, total_frames = extract_video_skeleton(
+            video_path, tracker,
+            person_select=args.person_select,
+            score_thr=args.score_thr,
+        )
 
         if kp is None or total_frames < 3:
             tqdm.write(f"  [SKIP] {frame_dir}: too few frames ({total_frames})")

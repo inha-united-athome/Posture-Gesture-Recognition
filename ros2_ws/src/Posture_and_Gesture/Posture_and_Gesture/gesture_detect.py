@@ -45,6 +45,7 @@ CLASS_COLORS = {
     "hands_up_single": (0, 0, 255),
     "hands_up_both": (0, 100, 255),
     "pointing": (0, 255, 0),
+    "stop": (255, 0, 0),
     "unknown": (80, 80, 80),
 }
 
@@ -241,8 +242,8 @@ class GestureDetectNode(Node):
 
         checkpoint = torch.load(str(model_path), map_location=self.device, weights_only=True)
         self.model = TCN(
-            input_dim=checkpoint.get("input_dim", 34),
-            num_classes=checkpoint.get("num_classes", 5),
+            input_dim=checkpoint.get("input_dim", 130),
+            num_classes=checkpoint.get("num_classes", 6),
             hidden_dims=checkpoint.get("hidden_dims", [64, 128, 128, 256]),
             kernel_size=checkpoint.get("kernel_size", 5),
             dropout=checkpoint.get("dropout", 0.3),
@@ -253,7 +254,7 @@ class GestureDetectNode(Node):
         self.inferencer = TCNFrameInferencer(
             model=self.model,
             device=self.device,
-            num_classes=checkpoint.get("num_classes", 5),
+            num_classes=checkpoint.get("num_classes", 6),
             max_frames=checkpoint.get("max_frames", 120),
             num_joints=checkpoint.get("num_joints", 65),
             pose_device=str(self.device),
