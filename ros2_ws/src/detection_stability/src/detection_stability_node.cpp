@@ -211,8 +211,10 @@ rclcpp_action::GoalResponse DetectionStabilityNode::handle_select_goal(
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
   }
 
-  if (goal->seconds <= 0.0F) {
-    RCLCPP_WARN(this->get_logger(), "Rejecting selection goal: seconds must be positive.");
+  if (goal->seconds == 0.0F) {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "Rejecting selection goal: seconds must be positive, or negative for unlimited.");
     return rclcpp_action::GoalResponse::REJECT;
   }
 
@@ -263,8 +265,17 @@ void DetectionStabilityNode::execute_select_goal(
 
   const auto start_time = this->get_clock()->now();
   const double duration_sec = static_cast<double>(goal->seconds);
+  const bool unlimited = duration_sec < 0.0;
   bool canceled = false;
   bool stopped = false;
+  std::optional<CandidateSummary> early_selected;
+
+  if (unlimited) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Selection goal running in unlimited mode (seconds=%.1f). Will stop when a valid "
+      "candidate is found.", duration_sec);
+  }
 
   while (rclcpp::ok()) {
     if (goal_handle->is_canceling()) {
@@ -280,9 +291,17 @@ void DetectionStabilityNode::execute_select_goal(
       break;
     }
 
-    const auto now = this->get_clock()->now();
-    if ((now - start_time).seconds() >= duration_sec) {
-      break;
+    if (unlimited) {
+      std::lock_guard<std::mutex> lock(selection_mutex_);
+      early_selected = choose_best_candidate_locked();
+      if (early_selected) {
+        break;
+      }
+    } else {
+      const auto now = this->get_clock()->now();
+      if ((now - start_time).seconds() >= duration_sec) {
+        break;
+      }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
@@ -291,8 +310,12 @@ void DetectionStabilityNode::execute_select_goal(
 
   std::optional<CandidateSummary> selected;
   if (!canceled && !stopped) {
-    std::lock_guard<std::mutex> lock(selection_mutex_);
-    selected = choose_best_candidate_locked();
+    if (early_selected) {
+      selected = early_selected;
+    } else {
+      std::lock_guard<std::mutex> lock(selection_mutex_);
+      selected = choose_best_candidate_locked();
+    }
   }
 
   if (selected) {
