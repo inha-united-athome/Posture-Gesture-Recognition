@@ -5,6 +5,7 @@ import numpy as np
 import sys
 import os
 import threading
+import time
 from pathlib import Path
 
 def _find_repo_root() -> Path:
@@ -17,6 +18,13 @@ def _find_repo_root() -> Path:
         ):
             return parent
     raise RuntimeError(f"Could not locate repository root from {current}")
+
+
+def _current_time_for_filename():
+    now = time.time()
+    local_time = time.localtime(now)
+    milliseconds = int((now - int(now)) * 1000)
+    return time.strftime("%Y%m%d_%H%M%S", local_time) + f"_{milliseconds:03d}"
 
 
 REPO_ROOT = _find_repo_root()
@@ -170,6 +178,9 @@ class GestureDetectNode(Node):
         self.declare_parameter('output_image_topic', '')
         self.declare_parameter('output_detection_topic', '')
         self.declare_parameter('output_jpeg_quality', 80)
+        self.declare_parameter('action_image_log_enabled', True)
+        self.declare_parameter('action_image_log_root_dir', '/home/thor/inha_log/module/posture_and_gesture/gesture_detection_logs')
+        self.declare_parameter('action_image_log_period_sec', 1.0)
 
         self.device = self.get_parameter('device').get_parameter_value().string_value
         self.det_frequency = self.get_parameter('det_frequency').get_parameter_value().integer_value
@@ -196,6 +207,16 @@ class GestureDetectNode(Node):
         self.output_image_topic = output_image_topic or f'{self.output_topic}/image/compressed'
         self.output_detection_topic = output_detection_topic or f'{self.output_topic}/detections'
         self.output_jpeg_quality = self.get_parameter('output_jpeg_quality').get_parameter_value().integer_value
+        self.action_image_log_enabled = (
+            self.get_parameter('action_image_log_enabled').get_parameter_value().bool_value
+        )
+        self.action_image_log_root_dir = Path(
+            self.get_parameter('action_image_log_root_dir').get_parameter_value().string_value
+        )
+        self.action_image_log_period_sec = max(
+            0.0,
+            self.get_parameter('action_image_log_period_sec').get_parameter_value().double_value,
+        )
 
         self.get_logger().info(
             f"""PostureDetectNode initialized with device={self.device},
@@ -264,6 +285,9 @@ class GestureDetectNode(Node):
         # Event Trigger
         self._action_active = False
         self.target_class = []
+        self._action_image_log_dir = None
+        self._last_action_image_log_time = 0.0
+        self._action_image_log_index = 0
         
         
     def start_subscription(self):
@@ -330,6 +354,7 @@ class GestureDetectNode(Node):
             detection_array.detections.append(detection)
 
         _draw_readable_gesture_overlay(result.debug_image, visible_debug_detections)
+        self._save_action_debug_image(result.debug_image)
         image_msg = bgr8_to_jpeg_compressed_image(
             header,
             result.debug_image,
@@ -371,6 +396,7 @@ class GestureDetectNode(Node):
         if not self._action_active:
             self.get_logger().info("Starting gesture detection service.")
             self._action_active = True
+            self._open_action_image_log()
             self.start_subscription()
 
     def _stop_action(self):
@@ -379,6 +405,52 @@ class GestureDetectNode(Node):
             self._action_active = False
             self.target_class = []
             self.destroy_subscription(self.sub)
+            self._close_action_image_log()
+
+    def _open_action_image_log(self):
+        self._action_image_log_dir = None
+        self._last_action_image_log_time = 0.0
+        self._action_image_log_index = 0
+
+        if not self.action_image_log_enabled:
+            return
+
+        action_dir = self.action_image_log_root_dir / f"action_{_current_time_for_filename()}"
+        try:
+            action_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.get_logger().warn(f"Failed to create action image log directory {action_dir}: {exc}")
+            return
+
+        self._action_image_log_dir = action_dir
+        self.get_logger().info(f"Gesture action images will be saved to {action_dir}")
+
+    def _close_action_image_log(self):
+        self._action_image_log_dir = None
+        self._last_action_image_log_time = 0.0
+        self._action_image_log_index = 0
+
+    def _save_action_debug_image(self, image):
+        if self._action_image_log_dir is None or image is None:
+            return
+
+        now = time.monotonic()
+        if (
+            self._last_action_image_log_time > 0.0
+            and now - self._last_action_image_log_time < self.action_image_log_period_sec
+        ):
+            return
+
+        filename = (
+            f"{self._action_image_log_index:06d}_"
+            f"{_current_time_for_filename()}_gesture.jpg"
+        )
+        output_path = self._action_image_log_dir / filename
+        if cv2.imwrite(str(output_path), image):
+            self._last_action_image_log_time = now
+            self._action_image_log_index += 1
+        else:
+            self.get_logger().warn(f"Failed to save action image log: {output_path}")
 
 def main(args=None):
     rclpy.init(args=args)
