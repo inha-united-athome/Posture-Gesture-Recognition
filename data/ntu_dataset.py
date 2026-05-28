@@ -26,18 +26,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from utils.skeleton_ops import get_swap_pairs
 
 
-# ===== Final label mapping (5-class merged dataset) =====
+# ===== Final label mapping (6-class merged dataset) =====
 # 0: idle             — NTU (reading, writing, phone_call, playing_phone, typing)
 # 1: waving           — NTU A023 hand_waving
 # 2: hands_up_single  — 커스텀 수집 (한손 들기)
 # 3: hands_up_both    — NTU A095 capitulate (양손 들기)
 # 4: pointing         — NTU A031 pointing
+# 5: stop             — 커스텀 수집 (정지 제스처)
 NTU_ACTION_NAMES = {
     0: "idle",
     1: "waving",
     2: "hands_up_single",
     3: "hands_up_both",
     4: "pointing",
+    5: "stop",
 }
 
 

@@ -59,6 +59,7 @@ CLASS_COLORS = {
     "hands_up_single":  (0, 0, 255),      # red
     "hands_up_both":    (0, 100, 255),    # dark orange
     "pointing":         (0, 255, 0),      # green
+    "stop":             (255, 0, 0),      # blue
     "unknown":          (80, 80, 80),     # dark gray
 }
 
@@ -100,8 +101,8 @@ def parse_args():
 def load_tcn(model_path, device):
     checkpoint = torch.load(model_path, map_location=device, weights_only=True)
     model = TCN(
-        input_dim=checkpoint.get("input_dim", 34),
-        num_classes=checkpoint.get("num_classes", 5),
+        input_dim=checkpoint.get("input_dim", 130),
+        num_classes=checkpoint.get("num_classes", 6),
         hidden_dims=checkpoint.get("hidden_dims", [64, 128, 128, 256]),
         kernel_size=checkpoint.get("kernel_size", 5),
         dropout=checkpoint.get("dropout", 0.3),
@@ -110,9 +111,9 @@ def load_tcn(model_path, device):
     model.eval()
 
     info = {
-        "num_classes": checkpoint.get("num_classes", 5),
-        "num_joints": checkpoint.get("num_joints", 17),
-        "input_dim": checkpoint.get("input_dim", 34),
+        "num_classes": checkpoint.get("num_classes", 6),
+        "num_joints": checkpoint.get("num_joints", 65),
+        "input_dim": checkpoint.get("input_dim", 130),
         "max_frames": checkpoint.get("max_frames", 120),
         "epoch": checkpoint.get("epoch", "?"),
         "val_acc": checkpoint.get("val_acc", "?"),

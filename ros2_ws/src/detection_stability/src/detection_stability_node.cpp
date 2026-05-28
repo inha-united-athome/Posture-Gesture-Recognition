@@ -3,10 +3,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
@@ -58,6 +61,43 @@ double median_in_place(std::vector<double> & values)
 double median_copy(std::vector<double> values)
 {
   return median_in_place(values);
+}
+
+std::string current_time_for_filename()
+{
+  const auto now = std::chrono::system_clock::now();
+  const auto now_time_t = std::chrono::system_clock::to_time_t(now);
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    now.time_since_epoch()) % 1000;
+
+  std::tm local_time{};
+  localtime_r(&now_time_t, &local_time);
+
+  std::ostringstream stamp;
+  stamp << std::put_time(&local_time, "%Y%m%d_%H%M%S") << "_"
+        << std::setw(3) << std::setfill('0') << ms.count();
+  return stamp.str();
+}
+
+std::string csv_escape(const std::string & value)
+{
+  const bool needs_quotes =
+    value.find_first_of(",\"\n\r") != std::string::npos;
+  if (!needs_quotes) {
+    return value;
+  }
+
+  std::string escaped;
+  escaped.reserve(value.size() + 2);
+  escaped.push_back('"');
+  for (const char ch : value) {
+    if (ch == '"') {
+      escaped.push_back('"');
+    }
+    escaped.push_back(ch);
+  }
+  escaped.push_back('"');
+  return escaped;
 }
 
 BBox bbox_from_msg(const vision_msgs::msg::BoundingBox2D & msg)
@@ -115,7 +155,11 @@ DetectionStabilityNode::DetectionStabilityNode()
   selected_point_topic_ =
     this->declare_parameter<std::string>("selected_point_topic", "/gesture_and_posture/selected_person/point");
   selected_image_path_ =
-    this->declare_parameter<std::string>("selected_image_path", "/tmp/selected_person.jpg");
+    this->declare_parameter<std::string>("selected_image_path", "/home/thor/inha_log/selected_person.jpg");
+  feedback_log_enabled_ =
+    this->declare_parameter<bool>("feedback_log_enabled", feedback_log_enabled_);
+  feedback_log_root_dir_ =
+    this->declare_parameter<std::string>("feedback_log_root_dir", "/home/thor/inha_log/module/gesture_and_posture/detection_stability_logs");
   action_name_ =
     this->declare_parameter<std::string>("action_name", "select_stable_person");
   camera_frame_ = this->declare_parameter<std::string>("camera_frame", "camera_head_color_optical_frame");
@@ -211,8 +255,10 @@ rclcpp_action::GoalResponse DetectionStabilityNode::handle_select_goal(
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
   }
 
-  if (goal->seconds <= 0.0F) {
-    RCLCPP_WARN(this->get_logger(), "Rejecting selection goal: seconds must be positive.");
+  if (goal->seconds == 0.0F) {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "Rejecting selection goal: seconds must be positive, or negative for unlimited.");
     return rclcpp_action::GoalResponse::REJECT;
   }
 
@@ -255,6 +301,7 @@ void DetectionStabilityNode::execute_select_goal(
   }
 
   reset_selection_state(*goal);
+  open_feedback_log(*goal);
   {
     std::lock_guard<std::mutex> lock(selection_mutex_);
     active_goal_ = goal_handle;
@@ -263,8 +310,17 @@ void DetectionStabilityNode::execute_select_goal(
 
   const auto start_time = this->get_clock()->now();
   const double duration_sec = static_cast<double>(goal->seconds);
+  const bool unlimited = duration_sec < 0.0;
   bool canceled = false;
   bool stopped = false;
+  std::optional<CandidateSummary> early_selected;
+
+  if (unlimited) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Selection goal running in unlimited mode (seconds=%.1f). Will stop when a valid "
+      "candidate is found.", duration_sec);
+  }
 
   while (rclcpp::ok()) {
     if (goal_handle->is_canceling()) {
@@ -280,9 +336,17 @@ void DetectionStabilityNode::execute_select_goal(
       break;
     }
 
-    const auto now = this->get_clock()->now();
-    if ((now - start_time).seconds() >= duration_sec) {
-      break;
+    if (unlimited) {
+      std::lock_guard<std::mutex> lock(selection_mutex_);
+      early_selected = choose_best_candidate_locked();
+      if (early_selected) {
+        break;
+      }
+    } else {
+      const auto now = this->get_clock()->now();
+      if ((now - start_time).seconds() >= duration_sec) {
+        break;
+      }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
@@ -291,8 +355,12 @@ void DetectionStabilityNode::execute_select_goal(
 
   std::optional<CandidateSummary> selected;
   if (!canceled && !stopped) {
-    std::lock_guard<std::mutex> lock(selection_mutex_);
-    selected = choose_best_candidate_locked();
+    if (early_selected) {
+      selected = early_selected;
+    } else {
+      std::lock_guard<std::mutex> lock(selection_mutex_);
+      selected = choose_best_candidate_locked();
+    }
   }
 
   if (selected) {
@@ -318,6 +386,7 @@ void DetectionStabilityNode::execute_select_goal(
     candidate_summaries_.clear();
     image_buffer_.clear();
   }
+  close_feedback_log();
 
   if (canceled) {
     goal_handle->canceled(result);
@@ -688,14 +757,60 @@ void DetectionStabilityNode::update_active_selection(
     }
     goal_handle = active_goal_;
 
+    const auto make_log_line =
+      [this, &output](
+        const inha_interfaces::msg::PostureAndGestureStability & stability,
+        const double class_score,
+        const geometry_msgs::msg::PointStamped * point,
+        const bool accepted_candidate,
+        const std::string & reject_reason)
+      {
+        std::ostringstream line;
+        line << std::fixed << std::setprecision(6)
+             << csv_escape(feedback_action_id_) << ','
+             << feedback_goal_seconds_ << ','
+             << csv_escape(feedback_target_class_name_) << ','
+             << active_min_class_score_ << ','
+             << active_min_stability_score_ << ','
+             << output.header.stamp.sec << "." << std::setw(9) << std::setfill('0')
+             << output.header.stamp.nanosec << std::setfill(' ') << ','
+             << frame_index_ << ','
+             << csv_escape(stability.track_id) << ','
+             << csv_escape(stability.class_name) << ','
+             << class_score << ','
+             << stability.stability_score << ','
+             << stability.depth_median_m << ','
+             << stability.depth_cost << ','
+             << stability.bbox_cost << ','
+             << stability.id_cost << ','
+             << stability.lidar_points << ',';
+        if (point) {
+          line << point->point.x << ','
+               << point->point.y << ','
+               << point->point.z << ',';
+        } else {
+          line << ",,,";
+        }
+        line << (accepted_candidate ? "true" : "false") << ','
+             << reject_reason;
+        return line.str();
+      };
+
     for (const auto & stability : output.stabilities) {
+      const double class_score = extract_class_score(stability);
+      std::string reject_reason;
       if (!class_matches(stability.class_name)) {
+        reject_reason = "class_mismatch";
+        write_feedback_log_line(
+          make_log_line(stability, class_score, nullptr, false, reject_reason));
         continue;
       }
 
-      const double class_score = extract_class_score(stability);
       geometry_msgs::msg::PointStamped point;
       if (!make_point_from_stability(stability, projection, point)) {
+        reject_reason = "no_depth_or_projection";
+        write_feedback_log_line(
+          make_log_line(stability, class_score, nullptr, false, reject_reason));
         continue;
       }
 
@@ -708,6 +823,10 @@ void DetectionStabilityNode::update_active_selection(
       if (class_score < active_min_class_score_ ||
         stability.stability_score < active_min_stability_score_)
       {
+        reject_reason = class_score < active_min_class_score_ ?
+          "class_score_low" : "stability_score_low";
+        write_feedback_log_line(
+          make_log_line(stability, class_score, &point, false, reject_reason));
         continue;
       }
 
@@ -722,12 +841,83 @@ void DetectionStabilityNode::update_active_selection(
       candidate.class_score_sum += class_score;
       candidate.stability_score_sum += stability.stability_score;
       candidate.combined_score_sum += class_score * stability.stability_score;
+
+      write_feedback_log_line(make_log_line(stability, class_score, &point, true, ""));
     }
 
     feedback->person_count = static_cast<uint32_t>(feedback->track_ids.size());
   }
 
   goal_handle->publish_feedback(feedback);
+}
+
+void DetectionStabilityNode::open_feedback_log(const SelectStablePerson::Goal & goal)
+{
+  if (!feedback_log_enabled_) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(feedback_log_mutex_);
+  if (feedback_log_file_.is_open()) {
+    feedback_log_file_.close();
+  }
+
+  feedback_action_id_ = "action_" + current_time_for_filename();
+  feedback_goal_seconds_ = goal.seconds;
+  feedback_target_class_name_ = goal.class_name;
+
+  const std::filesystem::path root_dir(feedback_log_root_dir_);
+  feedback_action_output_dir_ = root_dir / feedback_action_id_;
+  std::error_code error;
+  std::filesystem::create_directories(feedback_action_output_dir_, error);
+  if (error) {
+    RCLCPP_WARN(
+      this->get_logger(), "Failed to create feedback log directory %s: %s",
+      feedback_action_output_dir_.string().c_str(), error.message().c_str());
+    return;
+  }
+
+  feedback_log_path_ = feedback_action_output_dir_ / "feedback.csv";
+  feedback_log_file_.open(feedback_log_path_, std::ios::out | std::ios::trunc);
+  if (!feedback_log_file_.is_open()) {
+    RCLCPP_WARN(
+      this->get_logger(), "Failed to open feedback log: %s",
+      feedback_log_path_.string().c_str());
+    return;
+  }
+
+  feedback_log_file_
+    << "action_id,goal_seconds,target_class,min_class_score,min_stability_score,"
+       "stamp,frame_index,track_id,class_name,class_score,stability_score,depth_m,"
+       "depth_cost,bbox_cost,id_cost,lidar_points,point_x,point_y,point_z,"
+       "accepted_candidate,reject_reason\n";
+  feedback_log_file_.flush();
+
+  RCLCPP_INFO(
+    this->get_logger(), "Selection feedback CSV will be saved to %s",
+    feedback_log_path_.string().c_str());
+}
+
+void DetectionStabilityNode::close_feedback_log()
+{
+  std::lock_guard<std::mutex> lock(feedback_log_mutex_);
+  if (feedback_log_file_.is_open()) {
+    feedback_log_file_.flush();
+    feedback_log_file_.close();
+  }
+}
+
+void DetectionStabilityNode::write_feedback_log_line(const std::string & line)
+{
+  if (!feedback_log_enabled_) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(feedback_log_mutex_);
+  if (!feedback_log_file_.is_open()) {
+    return;
+  }
+  feedback_log_file_ << line << '\n';
 }
 
 bool DetectionStabilityNode::class_matches(const std::string & class_name) const
@@ -1389,4 +1579,3 @@ int main(int argc, char ** argv)
   rclcpp::shutdown();
   return 0;
 }
-

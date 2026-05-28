@@ -149,11 +149,11 @@ class TCN(nn.Module):
 
 if __name__ == "__main__":
     # Quick test
-    model = TCN(input_dim=34, num_classes=5)
+    model = TCN(input_dim=130, num_classes=6)
     print(f"Model parameters: {model.count_parameters():,}")
     print(model)
 
-    x = torch.randn(4, 34, 120)  # batch=4, 34 features, 120 frames
+    x = torch.randn(4, 130, 120)  # batch=4, 130 features (65 joints × 2), 120 frames
     mask = torch.ones(4, 120)
     out = model(x, mask)
     print(f"Input: {x.shape} → Output: {out.shape}")

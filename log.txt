@@ -1,0 +1,242 @@
+Skip to content
+PGW63
+Posture-Gesture-Recognition
+Repository navigation
+Code
+Issues
+Pull requests
+Agents
+Actions
+Projects
+Wiki
+Security and quality
+Insights
+Settings
+Important update
+On April 24 we'll start using GitHub Copilot interaction data for AI model training unless you opt out. Review this update and manage your preferences in your GitHub account settings.
+Please configure another 2FA method to reduce your risk of permanent account lockout. If you use SMS for 2FA, we strongly recommend against SMS as it is prone to fraud and delivery may be unreliable depending on your region.
+
+
+Posture-Gesture-Recognition/ros2_ws/src/Posture_and_Gesture/Posture_and_Gesture
+/posture_detect.py
+Go to file
+t
+T
+PGW63
+PGW63
+ros2 이미지 컬러 잘못 넘기는 오류 수정
+db17712
+ · 
+15 minutes ago
+Posture-Gesture-Recognition/ros2_ws/src/Posture_and_Gesture/Posture_and_Gesture
+/posture_detect.py
+
+Code
+
+Blame
+375 lines (307 loc) · 14.1 KB
+Older
+Newer
+PGW63
+last month
+
+ros package added
+        # Initialize model
+27 days ago
+
+commit
+        model_path = REPO_ROOT / 'models' / 'best_model.pth'
+last month
+
+ros package added
+        if torch.cuda.is_available() and self.device == 'cuda':
+            self.device = torch.device('cuda')
+        else:
+            self.device = torch.device('cpu')
+            self.get_logger().warn("CUDA not available, using CPU instead.")
+        
+27 days ago
+
+commit
+        checkpoint = torch.load(str(model_path), map_location=self.device, weights_only=True)
+last month
+
+ros package added
+        self.model = MLP(
+            input_dim=checkpoint.get("input_dim", 50),
+            num_classes=checkpoint.get("num_classes", NUM_CLASSES),
+        ).to(self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.model.eval()
+        self.inferencer = MLPFrameInferencer(
+            model=self.model,
+            device=self.device,
+            det_frequency=self.det_frequency,
+            track_ttl=self.track_ttl,
+            # track_match_distance=self.track_match_distance,
+            mode=self.mode,
+2 weeks ago
+
+added stable detection
+            class_colors=CLASS_COLORS,
+last month
+
+ros package added
+            # max_persons_inference=self.max_persons_inference
+        )
+        self.get_logger().info(f"Model loaded from {model_path} on device {self.device}")
+        # Event Trigger
+        self._action_active = False
+        self.target_class = []
+    def start_subscription(self):
+        self.sub = self.create_subscription(
+            CompressedImage if self.image_transport == 'compressed' else Image,
+            self.input_topic,
+            self.image_callback,
+            self.qos_best_effort
+        )
+    def image_callback(self, msg):
+        if not self._action_active:
+            return
+        
+        if self.image_transport == 'compressed':
+            np_arr = np.frombuffer(msg.data, np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if frame is None:
+                self.get_logger().warn("Failed to decode compressed image frame.")
+                return
+        else:
+            frame = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
+        
+        # Inference Posture with MLP
+        result = self.inferencer.infer(frame, return_debug_image=True)
+        ### result -> detections, debug_image, keypoints, scores
+        ### result.detections -> track_id, det_index, class_name, confidence, keypoint_scores
+        ###                      probabilities, center_xy, bbox_xyxy, skeleton_xy
+27 days ago
+
+commit
+        header = msg.header
+        header.frame_id = "camera_head_color_optical_frame"
+        detection_array = Detection2DArray()
+        detection_array.header = header
+2 weeks ago
+
+added stable detection
+        visible_debug_detections = []
+last month
+
+ros package added
+        for det in result.detections:
+27 days ago
+
+commit
+            if self.target_class and det.class_name not in self.target_class:
+                continue
+last month
+
+ros package added
+2 weeks ago
+
+added stable detection
+            bbox_xyxy = _bbox_from_detection(det, result.debug_image.shape)
+            if bbox_xyxy is None:
+last month
+
+ros package added
+                continue
+2 weeks ago
+
+added stable detection
+            visible_debug_detections.append((det, bbox_xyxy))
+last month
+
+ros package added
+            bb = BoundingBox2D()
+2 weeks ago
+
+added stable detection
+            bb.center.position.x = float((bbox_xyxy[0] + bbox_xyxy[2]) / 2.0)
+            bb.center.position.y = float((bbox_xyxy[1] + bbox_xyxy[3]) / 2.0)
+            bb.size_x = float(bbox_xyxy[2] - bbox_xyxy[0])
+            bb.size_y = float(bbox_xyxy[3] - bbox_xyxy[1])
+27 days ago
+
+commit
+            detection = Detection2D()
+            detection.header = header
+            detection.bbox = bb
+            detection.id = f"track:{det.track_id};det:{det.det_index}"
+            hypothesis = ObjectHypothesisWithPose()
+            hypothesis.hypothesis.class_id = str(det.class_name)
+            hypothesis.hypothesis.score = float(det.confidence)
+            detection.results.append(hypothesis)
+            detection_array.detections.append(detection)
+2 weeks ago
+
+added stable detection
+        _draw_readable_posture_overlay(result.debug_image, visible_debug_detections)
+        image_msg = bgr8_to_jpeg_compressed_image(
+            header,
+15 minutes ago
+
+ros2 이미지 컬러 잘못 넘기는 오류 수정
+            result.debug_image,
+2 weeks ago
+
+added stable detection
+            self.output_jpeg_quality,
+        )
+        if image_msg is None:
+            self.get_logger().warn("Failed to encode debug image as JPEG.")
+        else:
+            self.image_pub.publish(image_msg)
+27 days ago
+
+commit
+        self.detection_pub.publish(detection_array)
+last month
+
+ros package added
+        
+    
+    def posture_detection_callback(self, request, response):
+        """
+        PostureDetection Service:
+        - Request:
+            bool start
+            string[] target_class
+        - Response:
+            bool success
+            string message
+        """
+        if request.start:
+            self.target_class = list(request.target_class)
+            self.get_logger().info(f"Received posture detection request for class: {self.target_class}")
+            self._start_action() 
+        else:
+            self.get_logger().info("Received posture detection stop request.")
+            self._stop_action()
+        
+        response.success = True
+        response.message = "Posture detection started." if request.start else "Posture detection stopped."
+        return response
+    def _start_action(self):
+        if not self._action_active:
+            self.get_logger().info("Starting posture detection service.")
+            self._action_active = True
+            self.start_subscription()
+    def _stop_action(self):
+        if self._action_active:
+            self.get_logger().info("Stopping posture detection service.")
+            self.target_class = []
+            self._action_active = False
+            self.destroy_subscription(self.sub)
+def main(args=None):
+    rclpy.init(args=args)
+    node = PostureDetectNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+if __name__ == '__main__':
+    main()
