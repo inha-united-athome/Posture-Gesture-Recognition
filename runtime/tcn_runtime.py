@@ -72,7 +72,13 @@ def buffers_to_batch_tensors(frame_buffers, max_frames, device, num_joints=65):
 
 def compute_pose_features(frame_buffer):
     if len(frame_buffer) < 5:
-        return {"wrist_above": False, "n_hands_up": 0, "temporal_std": 1.0}
+        return {
+            "wrist_above": False,
+            "left_up": False,
+            "right_up": False,
+            "n_hands_up": 0,
+            "temporal_std": 1.0,
+        }
 
     recent = list(frame_buffer)[-30:]
     arr = np.stack(recent, axis=0)
@@ -86,7 +92,13 @@ def compute_pose_features(frame_buffer):
     r_std = np.std(arr[:, _R_WRIST, :], axis=0).mean()
     temporal_std = max(l_std, r_std)
 
-    return {"wrist_above": (n_hands_up >= 1), "n_hands_up": n_hands_up, "temporal_std": temporal_std}
+    return {
+        "wrist_above": (n_hands_up >= 1),
+        "left_up": bool(l_up),
+        "right_up": bool(r_up),
+        "n_hands_up": n_hands_up,
+        "temporal_std": temporal_std,
+    }
 
 
 def adjust_probs(probs_dict, pose_features):
@@ -100,13 +112,20 @@ def adjust_probs(probs_dict, pose_features):
     adjusted = dict(probs_dict)
 
     if temporal_std < static_thr:
-        boost_cls = "hands_up_single" if n_hands == 1 else "hands_up_both"
+        if n_hands >= 2:
+            boost_cls = "hands_up_both"
+        elif pose_features.get("left_up"):
+            boost_cls = "left_handup"
+        else:
+            boost_cls = "right_handup"
         transfer = adjusted.get("waving", 0.0) * 0.6
         adjusted["waving"] = adjusted.get("waving", 0.0) - transfer
         adjusted[boost_cls] = adjusted.get(boost_cls, 0.0) + transfer
     elif temporal_std > dynamic_thr:
-        transfer = adjusted.get("hands_up_single", 0.0) * 0.3
-        adjusted["hands_up_single"] = adjusted.get("hands_up_single", 0.0) - transfer
+        single_hand_prob = adjusted.get("left_handup", 0.0) + adjusted.get("right_handup", 0.0)
+        transfer = single_hand_prob * 0.3
+        adjusted["left_handup"] = adjusted.get("left_handup", 0.0) * 0.7
+        adjusted["right_handup"] = adjusted.get("right_handup", 0.0) * 0.7
         adjusted["waving"] = adjusted.get("waving", 0.0) + transfer
 
     total = sum(adjusted.values())

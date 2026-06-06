@@ -11,12 +11,14 @@ with the same format as NTU subset.
    44-64:  Right Hand (21)
 
 Class mapping (from folder name):
-    idle          → 0
-    wave          → 1
-    hand_up       → 2  (hands_up_single)
-    hand_up_both  → 3  (hands_up_both)
-    pointing      → 4
-    stop          → 5
+    idle / idle2     → 0
+    wave             → 1
+    left_handup      → 2
+    right_handup     → 3
+    hand_up_both     → 4
+    left_pointing    → 5
+    right_pointing   → 6
+    stop             → 7
 
 PKL format (same as NTU):
     annotations[i]:
@@ -45,20 +47,29 @@ from tqdm import tqdm
 # ===== Class mapping (folder name → label) =====
 FOLDER_TO_LABEL = {
     "idle": 0,
+    "idle2": 0,
     "wave": 1,
+    "left_handup": 2,
+    "left_hand_up": 2,
     "hand_up": 2,
-    "hand_up_both": 3,
-    "pointing": 4,
-    "stop": 5,
+    "right_handup": 3,
+    "right_hand_up": 3,
+    "hand_up_both": 4,
+    "pointing": 5,
+    "left_pointing": 5,
+    "right_pointing": 6,
+    "stop": 7,
 }
 
 LABEL_TO_NAME = {
     0: "idle",
     1: "waving",
-    2: "hands_up_single",
-    3: "hands_up_both",
-    4: "pointing",
-    5: "stop",
+    2: "left_handup",
+    3: "right_handup",
+    4: "hands_up_both",
+    5: "left_pointing",
+    6: "right_pointing",
+    7: "stop",
 }
 
 # RTMPose 133 → 65 joints (face 제거)
@@ -78,6 +89,9 @@ def parse_args():
     parser.add_argument("--out", type=str, default="wholebody_6class.pkl")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--backend", type=str, default="onnxruntime")
+    parser.add_argument("--mode", type=str, default="performance",
+                        choices=["performance", "balanced", "lightweight"],
+                        help="rtmlib Wholebody model size/speed preset")
     parser.add_argument("--train_ratio", type=float, default=0.8,
                         help="Train/val split ratio")
     parser.add_argument("--seed", type=int, default=42)
@@ -93,7 +107,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def init_pose_tracker(rtmlib_path, device, backend):
+def init_pose_tracker(rtmlib_path, device, backend, mode="performance"):
     sys.path.insert(0, rtmlib_path)
     from rtmlib import PoseTracker, Wholebody
 
@@ -101,7 +115,7 @@ def init_pose_tracker(rtmlib_path, device, backend):
         Wholebody,
         det_frequency=7,
         to_openpose=False,
-        mode='performance',
+        mode=mode,
         backend=backend,
         device=device,
     )
@@ -243,7 +257,7 @@ def collect_videos(data_dir):
 
         # Recursively find all video files
         video_files = []
-        for ext in ["*.avi", "*.mp4"]:
+        for ext in ["*.avi", "*.mp4", "*.mov", "*.mkv"]:
             video_files.extend(glob(os.path.join(action_path, "**", ext), recursive=True))
         video_files = sorted(video_files)
 
@@ -270,6 +284,7 @@ def main():
     print(f"  Output:     {args.out}")
     print(f"  Device:     {args.device}")
     print(f"  Backend:    {args.backend}")
+    print(f"  Mode:       {args.mode}")
     print(f"  Person sel: {args.person_select} (score_thr={args.score_thr})")
     print()
 
@@ -284,7 +299,7 @@ def main():
 
     # ===== Init pose tracker =====
     print("Initializing pose tracker...")
-    tracker = init_pose_tracker(args.rtmlib_path, args.device, args.backend)
+    tracker = init_pose_tracker(args.rtmlib_path, args.device, args.backend, args.mode)
 
     # ===== Extract skeletons =====
     annotations = []

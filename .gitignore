@@ -44,3 +44,8 @@ ros2_ws/log/
 # ===== Communication =====
 temproal_communication/
 
+# ===== etc =====
+log.txt
+Ultralytics/
+
+

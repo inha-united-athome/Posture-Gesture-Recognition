@@ -56,9 +56,11 @@ from runtime.tcn_runtime import (
 CLASS_COLORS = {
     "idle":             (128, 128, 128),  # gray
     "waving":           (0, 165, 255),    # orange
-    "hands_up_single":  (0, 0, 255),      # red
+    "left_handup":      (0, 0, 255),      # red
+    "right_handup":     (0, 80, 255),     # orange red
     "hands_up_both":    (0, 100, 255),    # dark orange
-    "pointing":         (0, 255, 0),      # green
+    "left_pointing":    (0, 255, 0),      # green
+    "right_pointing":   (80, 220, 0),     # green
     "stop":             (255, 0, 0),      # blue
     "unknown":          (80, 80, 80),     # dark gray
 }
@@ -333,10 +335,10 @@ def main():
                 # 화면에 있는 사람만 현재 target 후보로 사용
                 if tid not in tid_to_detidx:
                     continue
-                if track.pred_cls in ["hands_up_single", "hands_up_both"] and track.pred_conf > 0.7:
+                if track.pred_cls in ["left_handup", "right_handup", "hands_up_both"] and track.pred_conf > 0.7:
                     hands_up_candidates.append((tid, track))
-            
-            # 우선순위: hands_up_both > hands_up_single, bbox 크기 큰 순
+
+            # 우선순위: hands_up_both > left/right handup, bbox 크기 큰 순
             hands_up_candidates.sort(
                 key=lambda x: (
                     x[1].pred_cls == "hands_up_both",  # hands_up_both가 True = 1

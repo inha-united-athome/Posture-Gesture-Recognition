@@ -1,0 +1,25 @@
+﻿# YOLO11n no-augmentation validation summary for notes
+Accuracy: 0.9202 (461/501)
+Best checkpoint: models/best_tcn_yolo11n_noaug_xsub.pth
+Best epoch: 76
+
+Confusion Matrix (rows=true, columns=pred):
+True\Pred       idle  waving  left_handup  right_handup  hands_up_both  left_pointing  right_pointing  stop
+idle             141       1            0             0              2              0               0     4
+waving             1      47            9             2              0              1               0     0
+left_handup        1       5           24             0              0              0               0     0
+right_handup       0       1            0            28              1              0               0     0
+hands_up_both      0       0            0             0             60              0               0     0
+left_pointing      1       0            0             0              0             55               0     3
+right_pointing     2       0            0             3              1              1              52     0
+stop               1       0            0             0              0              0               0    54
+
+Per-class F1:
+idle            0.9559
+waving          0.8246
+left_handup     0.7619
+right_handup    0.8889
+hands_up_both   0.9677
+left_pointing   0.9483
+right_pointing  0.9369
+stop            0.9310
