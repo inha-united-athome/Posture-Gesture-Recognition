@@ -11,6 +11,11 @@ def generate_launch_description():
     lidar_topic = LaunchConfiguration("lidar_topic")
     image_topic = LaunchConfiguration("image_topic")
     instance_mask_topic = LaunchConfiguration("instance_mask_topic")
+    debug_image_topic = LaunchConfiguration("debug_image_topic")
+    publish_debug_image = LaunchConfiguration("publish_debug_image")
+    yolo_enable_service = LaunchConfiguration("yolo_enable_service")
+    yolo_initially_enabled = LaunchConfiguration("yolo_initially_enabled")
+    enable_yolo_on_selection = LaunchConfiguration("enable_yolo_on_selection")
     output_topic = LaunchConfiguration("output_topic")
     selected_point_topic = LaunchConfiguration("selected_point_topic")
     yolo_model_path = LaunchConfiguration("yolo_model_path")
@@ -19,6 +24,7 @@ def generate_launch_description():
     yolo_iou = LaunchConfiguration("yolo_iou")
     yolo_imgsz = LaunchConfiguration("yolo_imgsz")
     yolo_erode_pixels = LaunchConfiguration("yolo_erode_pixels")
+    use_sim_time = LaunchConfiguration("use_sim_time")
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -39,6 +45,17 @@ def generate_launch_description():
             default_value="/gesture_and_posture/person_instance_mask",
         ),
         DeclareLaunchArgument(
+            "debug_image_topic",
+            default_value="/gesture_and_posture/person_instance_mask/debug/compressed",
+        ),
+        DeclareLaunchArgument("publish_debug_image", default_value="true"),
+        DeclareLaunchArgument(
+            "yolo_enable_service",
+            default_value="/yolo_instance_seg_node/set_enable",
+        ),
+        DeclareLaunchArgument("yolo_initially_enabled", default_value="false"),
+        DeclareLaunchArgument("enable_yolo_on_selection", default_value="true"),
+        DeclareLaunchArgument(
             "output_topic",
             default_value="/gesture_and_posture/detection_stability",
         ),
@@ -52,6 +69,7 @@ def generate_launch_description():
         DeclareLaunchArgument("yolo_iou", default_value="0.50"),
         DeclareLaunchArgument("yolo_imgsz", default_value="640"),
         DeclareLaunchArgument("yolo_erode_pixels", default_value="3"),
+        DeclareLaunchArgument("use_sim_time", default_value="false"),
         Node(
             package="detection_stability",
             executable="yolo_instance_seg_node",
@@ -60,12 +78,17 @@ def generate_launch_description():
             parameters=[{
                 "input_topic": image_topic,
                 "output_topic": instance_mask_topic,
+                "debug_image_topic": debug_image_topic,
+                "publish_debug_image": ParameterValue(publish_debug_image, value_type=bool),
+                "enable_service_name": yolo_enable_service,
+                "initially_enabled": ParameterValue(yolo_initially_enabled, value_type=bool),
                 "model_path": yolo_model_path,
                 "device": yolo_device,
                 "conf": ParameterValue(yolo_conf, value_type=float),
                 "iou": ParameterValue(yolo_iou, value_type=float),
                 "imgsz": ParameterValue(yolo_imgsz, value_type=int),
                 "erode_pixels": ParameterValue(yolo_erode_pixels, value_type=int),
+                "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
             }],
         ),
         Node(
@@ -82,6 +105,12 @@ def generate_launch_description():
                 "output_topic": output_topic,
                 "selected_point_topic": selected_point_topic,
                 "use_instance_mask_depth": True,
+                "yolo_instance_seg_enable_service": yolo_enable_service,
+                "enable_yolo_instance_seg_on_selection": ParameterValue(
+                    enable_yolo_on_selection,
+                    value_type=bool,
+                ),
+                "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
             }],
         ),
     ])

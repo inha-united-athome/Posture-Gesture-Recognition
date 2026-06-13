@@ -16,6 +16,7 @@
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "inha_interfaces/action/select_stable_person.hpp"
 #include "inha_interfaces/msg/posture_and_gesture_stability_array.hpp"
+#include "inha_interfaces/srv/set_enable.hpp"
 #include "message_filters/subscriber.h"
 #include "message_filters/sync_policies/approximate_time.h"
 #include "message_filters/synchronizer.h"
@@ -165,6 +166,7 @@ private:
   void build_manual_camera_info();
   void start_input_subscriptions();
   void stop_input_subscriptions();
+  void set_yolo_instance_seg_enabled(bool enabled);
   void request_stop_selection();
   void reset_selection_state(const SelectStablePerson::Goal & goal);
   void on_camera_info(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg);
@@ -261,6 +263,7 @@ private:
   std::string output_frame_;
   bool feedback_log_enabled_{true};
   std::string feedback_log_root_dir_;
+  std::string yolo_instance_seg_enable_service_;
 
 
   int sync_queue_size_{10};
@@ -272,6 +275,7 @@ private:
   int lidar_point_step_{2};
   int max_projected_lidar_points_{4000};
   bool use_instance_mask_depth_{true};
+  bool enable_yolo_instance_seg_on_selection_{true};
   double max_instance_mask_age_sec_{0.50};
   double instance_depth_cluster_tolerance_m_{0.30};
 
@@ -316,6 +320,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr instance_mask_sub_;
   rclcpp::Publisher<inha_interfaces::msg::PostureAndGestureStabilityArray>::SharedPtr stability_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr selected_point_pub_;
+  rclcpp::Client<inha_interfaces::srv::SetEnable>::SharedPtr yolo_instance_seg_enable_client_;
   rclcpp_action::Server<SelectStablePerson>::SharedPtr select_action_server_;
 
   message_filters::Subscriber<DetectionMsg> filtered_detections_sub_;

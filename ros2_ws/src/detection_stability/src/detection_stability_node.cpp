@@ -256,6 +256,9 @@ DetectionStabilityNode::DetectionStabilityNode()
     this->declare_parameter<bool>("feedback_log_enabled", feedback_log_enabled_);
   feedback_log_root_dir_ =
     this->declare_parameter<std::string>("feedback_log_root_dir", "/home/thor/inha_log/module/gesture_and_posture/detection_stability_logs");
+  yolo_instance_seg_enable_service_ =
+    this->declare_parameter<std::string>(
+    "yolo_instance_seg_enable_service", "/yolo_instance_seg_node/set_enable");
   action_name_ =
     this->declare_parameter<std::string>("action_name", "select_stable_person");
   camera_frame_ = this->declare_parameter<std::string>("camera_frame", "camera_head_color_optical_frame");
@@ -271,6 +274,9 @@ DetectionStabilityNode::DetectionStabilityNode()
   max_projected_lidar_points_ = this->declare_parameter<int>("max_projected_lidar_points", 4000);
   use_instance_mask_depth_ =
     this->declare_parameter<bool>("use_instance_mask_depth", use_instance_mask_depth_);
+  enable_yolo_instance_seg_on_selection_ =
+    this->declare_parameter<bool>(
+    "enable_yolo_instance_seg_on_selection", enable_yolo_instance_seg_on_selection_);
   max_instance_mask_age_sec_ =
     this->declare_parameter<double>("max_instance_mask_age_sec", max_instance_mask_age_sec_);
   instance_depth_cluster_tolerance_m_ =
@@ -330,6 +336,10 @@ DetectionStabilityNode::DetectionStabilityNode()
   selected_point_pub_ =
     this->create_publisher<geometry_msgs::msg::PointStamped>(
     selected_point_topic_, rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
+  if (enable_yolo_instance_seg_on_selection_) {
+    yolo_instance_seg_enable_client_ =
+      this->create_client<inha_interfaces::srv::SetEnable>(yolo_instance_seg_enable_service_);
+  }
 
   select_action_server_ = rclcpp_action::create_server<SelectStablePerson>(
     this,
@@ -342,11 +352,13 @@ DetectionStabilityNode::DetectionStabilityNode()
   RCLCPP_INFO(
     this->get_logger(),
     "detection_stability_node ready: action=%s, detections=%s, camera_info=%s, "
-    "lidar_pointcloud=%s, image=%s, output=%s, selected_point=%s. "
+    "lidar_pointcloud=%s, image=%s, output=%s, selected_point=%s, "
+    "yolo_enable_service=%s. "
     "Input subscriptions stay idle until start=true.",
     action_name_.c_str(),
     detections_topic_.c_str(), camera_info_topic_.c_str(), lidar_topic_.c_str(),
-    image_topic_.c_str(), output_topic_.c_str(), selected_point_topic_.c_str());
+    image_topic_.c_str(), output_topic_.c_str(), selected_point_topic_.c_str(),
+    enable_yolo_instance_seg_on_selection_ ? yolo_instance_seg_enable_service_.c_str() : "disabled");
 }
 
 rclcpp_action::GoalResponse DetectionStabilityNode::handle_select_goal(
@@ -514,6 +526,8 @@ void DetectionStabilityNode::start_input_subscriptions()
     return;
   }
 
+  set_yolo_instance_seg_enabled(true);
+
   {
     std::lock_guard<std::mutex> camera_lock(camera_info_mutex_);
     if (!latest_camera_info_) {
@@ -574,7 +588,48 @@ void DetectionStabilityNode::stop_input_subscriptions()
   if (!has_camera_info) {
     camera_info_sub_.reset();
   }
+  set_yolo_instance_seg_enabled(false);
   inputs_active_ = false;
+}
+
+void DetectionStabilityNode::set_yolo_instance_seg_enabled(bool enabled)
+{
+  if (!enable_yolo_instance_seg_on_selection_ || !yolo_instance_seg_enable_client_) {
+    return;
+  }
+
+  if (!yolo_instance_seg_enable_client_->service_is_ready()) {
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(),
+      *this->get_clock(),
+      5000,
+      "YOLO instance segmentation enable service is not ready: %s",
+      yolo_instance_seg_enable_service_.c_str());
+    return;
+  }
+
+  auto request = std::make_shared<inha_interfaces::srv::SetEnable::Request>();
+  request->enable = enabled;
+  yolo_instance_seg_enable_client_->async_send_request(
+    request,
+    [this, enabled](rclcpp::Client<inha_interfaces::srv::SetEnable>::SharedFuture future) {
+      try {
+        const auto response = future.get();
+        if (!response->success) {
+          RCLCPP_WARN(
+            this->get_logger(),
+            "YOLO instance segmentation %s request failed: %s",
+            enabled ? "enable" : "disable",
+            response->message.c_str());
+        }
+      } catch (const std::exception & exc) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "YOLO instance segmentation %s request failed: %s",
+          enabled ? "enable" : "disable",
+          exc.what());
+      }
+    });
 }
 
 void DetectionStabilityNode::request_stop_selection()
