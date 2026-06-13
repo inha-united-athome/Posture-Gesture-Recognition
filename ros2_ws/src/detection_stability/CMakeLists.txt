@@ -51,6 +51,17 @@ install(
 )
 
 install(
+  PROGRAMS scripts/yolo_instance_seg_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME yolo_instance_seg_node
+)
+
+install(
+  DIRECTORY launch/
+  DESTINATION share/${PROJECT_NAME}/launch
+)
+
+install(
   DIRECTORY include/
   DESTINATION include
 )

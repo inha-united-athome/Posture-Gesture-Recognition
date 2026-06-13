@@ -23,6 +23,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/compressed_image.hpp"
+#include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2_ros/buffer.h"
@@ -128,6 +129,14 @@ struct ImageFrame
   sensor_msgs::msg::CompressedImage::ConstSharedPtr msg;
 };
 
+struct InstanceMaskFrame
+{
+  rclcpp::Time stamp;
+  uint32_t width{0};
+  uint32_t height{0};
+  std::vector<uint16_t> labels;
+};
+
 class DetectionStabilityNode : public rclcpp::Node
 {
 public:
@@ -160,6 +169,7 @@ private:
   void reset_selection_state(const SelectStablePerson::Goal & goal);
   void on_camera_info(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg);
   void on_image(const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg);
+  void on_instance_mask(const sensor_msgs::msg::Image::ConstSharedPtr msg);
   void on_point_cloud_pair(
     const DetectionMsg::ConstSharedPtr & detections,
     const CloudMsg::ConstSharedPtr & cloud);
@@ -176,7 +186,8 @@ private:
     const BBox & search_bbox);
   DepthStats compute_depth_stats(
     const BBox & bbox,
-    const ProjectedLidar & projected_lidar) const;
+    const ProjectedLidar & projected_lidar,
+    const InstanceMaskFrame * instance_mask = nullptr) const;
   CameraProjection make_projection(
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info,
     const std::string & detection_frame) const;
@@ -214,6 +225,8 @@ private:
   std::string extract_track_id(const std::string & detection_id) const;
   std::string extract_class_name(const vision_msgs::msg::Detection2D & detection) const;
   sensor_msgs::msg::CameraInfo::ConstSharedPtr current_camera_info();
+  std::optional<InstanceMaskFrame> current_instance_mask(
+    const rclcpp::Time & target_stamp) const;
 
   void update_active_selection(
     const inha_interfaces::msg::PostureAndGestureStabilityArray & output);
@@ -240,6 +253,7 @@ private:
   std::string lidar_topic_;
   std::string output_topic_;
   std::string image_topic_;
+  std::string instance_mask_topic_;
   std::string selected_point_topic_;
   std::string selected_image_path_;
   std::string action_name_;
@@ -257,6 +271,9 @@ private:
   int min_lidar_points_{5};
   int lidar_point_step_{2};
   int max_projected_lidar_points_{4000};
+  bool use_instance_mask_depth_{true};
+  double max_instance_mask_age_sec_{0.50};
+  double instance_depth_cluster_tolerance_m_{0.30};
 
   int manual_camera_width_{640};
   int manual_camera_height_{480};
@@ -296,6 +313,7 @@ private:
 
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
   rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr image_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr instance_mask_sub_;
   rclcpp::Publisher<inha_interfaces::msg::PostureAndGestureStabilityArray>::SharedPtr stability_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr selected_point_pub_;
   rclcpp_action::Server<SelectStablePerson>::SharedPtr select_action_server_;
@@ -316,10 +334,14 @@ private:
   bool selection_active_{false};
   bool stop_selection_requested_{false};
   std::string target_class_name_;
+  std::vector<std::string> target_class_names_;
   float active_min_class_score_{0.0F};
   float active_min_stability_score_{0.0F};
   std::unordered_map<std::string, CandidateSummary> candidate_summaries_;
   std::deque<ImageFrame> image_buffer_;
+
+  mutable std::mutex instance_mask_mutex_;
+  std::optional<InstanceMaskFrame> latest_instance_mask_;
 
   std::mutex feedback_log_mutex_;
   std::ofstream feedback_log_file_;

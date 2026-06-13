@@ -11,7 +11,10 @@
 
   <depend>geometry_msgs</depend>
   <depend>inha_interfaces</depend>
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
   <depend>message_filters</depend>
+  <depend>rclpy</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
   <depend>sensor_msgs</depend>
