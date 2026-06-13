@@ -124,6 +124,12 @@ struct CandidateSummary
   double selected_depth_m{0.0};
 };
 
+struct SelectionTrackStats
+{
+  uint32_t total_observations{0};
+  uint32_t class_observations{0};
+};
+
 struct ImageFrame
 {
   rclcpp::Time stamp;
@@ -308,6 +314,7 @@ private:
   double default_min_class_score_{0.50};
   double default_min_stability_score_{0.70};
   double depth_tie_tolerance_m_{0.25};
+  double min_class_frame_ratio_{0.50};
   double crop_margin_ratio_{0.15};
   int min_selection_observations_{1};
   int image_buffer_size_{30};
@@ -343,6 +350,7 @@ private:
   float active_min_class_score_{0.0F};
   float active_min_stability_score_{0.0F};
   std::unordered_map<std::string, CandidateSummary> candidate_summaries_;
+  std::unordered_map<std::string, SelectionTrackStats> selection_track_stats_;
   std::deque<ImageFrame> image_buffer_;
 
   mutable std::mutex instance_mask_mutex_;

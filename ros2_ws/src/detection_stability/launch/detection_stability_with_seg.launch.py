@@ -16,6 +16,7 @@ def generate_launch_description():
     yolo_enable_service = LaunchConfiguration("yolo_enable_service")
     yolo_initially_enabled = LaunchConfiguration("yolo_initially_enabled")
     enable_yolo_on_selection = LaunchConfiguration("enable_yolo_on_selection")
+    min_class_frame_ratio = LaunchConfiguration("min_class_frame_ratio")
     output_topic = LaunchConfiguration("output_topic")
     selected_point_topic = LaunchConfiguration("selected_point_topic")
     yolo_model_path = LaunchConfiguration("yolo_model_path")
@@ -55,6 +56,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("yolo_initially_enabled", default_value="false"),
         DeclareLaunchArgument("enable_yolo_on_selection", default_value="true"),
+        DeclareLaunchArgument("min_class_frame_ratio", default_value="0.50"),
         DeclareLaunchArgument(
             "output_topic",
             default_value="/gesture_and_posture/detection_stability",
@@ -110,6 +112,7 @@ def generate_launch_description():
                     enable_yolo_on_selection,
                     value_type=bool,
                 ),
+                "min_class_frame_ratio": ParameterValue(min_class_frame_ratio, value_type=float),
                 "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
             }],
         ),

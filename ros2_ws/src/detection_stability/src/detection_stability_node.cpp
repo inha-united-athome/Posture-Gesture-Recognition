@@ -320,6 +320,8 @@ DetectionStabilityNode::DetectionStabilityNode()
     this->declare_parameter<double>("default_min_stability_score", 0.70);
   depth_tie_tolerance_m_ =
     this->declare_parameter<double>("depth_tie_tolerance_m", 0.25);
+  min_class_frame_ratio_ =
+    this->declare_parameter<double>("min_class_frame_ratio", min_class_frame_ratio_);
   crop_margin_ratio_ =
     this->declare_parameter<double>("crop_margin_ratio", 0.15);
   min_selection_observations_ =
@@ -655,6 +657,7 @@ void DetectionStabilityNode::reset_selection_state(const SelectStablePerson::Goa
   stop_selection_requested_ = false;
   selection_active_ = true;
   candidate_summaries_.clear();
+  selection_track_stats_.clear();
   image_buffer_.clear();
   {
     std::lock_guard<std::mutex> mask_lock(instance_mask_mutex_);
@@ -695,6 +698,7 @@ void DetectionStabilityNode::sanitize_parameters()
   default_min_class_score_ = clamp01(default_min_class_score_);
   default_min_stability_score_ = clamp01(default_min_stability_score_);
   depth_tie_tolerance_m_ = std::max(0.0, depth_tie_tolerance_m_);
+  min_class_frame_ratio_ = clamp01(min_class_frame_ratio_);
   crop_margin_ratio_ = std::max(0.0, crop_margin_ratio_);
   min_selection_observations_ = std::max(1, min_selection_observations_);
   image_buffer_size_ = std::max(1, image_buffer_size_);
@@ -1042,8 +1046,15 @@ void DetectionStabilityNode::update_active_selection(
 
     for (const auto & stability : output.stabilities) {
       const double class_score = extract_class_score(stability);
+      auto & track_stats = selection_track_stats_[stability.track_id];
+      track_stats.total_observations += 1;
+      const bool class_matched = class_matches(stability.class_name);
+      if (class_matched) {
+        track_stats.class_observations += 1;
+      }
+
       std::string reject_reason;
-      if (!class_matches(stability.class_name)) {
+      if (!class_matched) {
         reject_reason = "class_mismatch";
         write_feedback_log_line(
           make_log_line(stability, class_score, nullptr, false, reject_reason));
@@ -1224,6 +1235,17 @@ std::optional<CandidateSummary> DetectionStabilityNode::choose_best_candidate_lo
     if (candidate.observations < static_cast<uint32_t>(min_selection_observations_) ||
       candidate.depths_m.empty())
     {
+      continue;
+    }
+
+    const auto stats_it = selection_track_stats_.find(candidate.track_id);
+    const auto total_observations = stats_it != selection_track_stats_.end() ?
+      stats_it->second.total_observations : candidate.observations;
+    const auto class_observations = stats_it != selection_track_stats_.end() ?
+      stats_it->second.class_observations : candidate.observations;
+    const double class_frame_ratio = total_observations > 0 ?
+      static_cast<double>(class_observations) / static_cast<double>(total_observations) : 0.0;
+    if (class_frame_ratio < min_class_frame_ratio_) {
       continue;
     }
 
