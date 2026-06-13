@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -229,6 +231,9 @@ private:
   bool save_selected_image(
     const CandidateSummary & selected,
     const sensor_msgs::msg::CompressedImage::ConstSharedPtr & image_msg) const;
+  void open_feedback_log(const SelectStablePerson::Goal & goal);
+  void close_feedback_log();
+  void write_feedback_log_line(const std::string & line);
 
   std::string detections_topic_;
   std::string camera_info_topic_;
@@ -240,6 +245,8 @@ private:
   std::string action_name_;
   std::string camera_frame_;
   std::string output_frame_;
+  bool feedback_log_enabled_{true};
+  std::string feedback_log_root_dir_;
 
 
   int sync_queue_size_{10};
@@ -314,6 +321,14 @@ private:
   std::unordered_map<std::string, CandidateSummary> candidate_summaries_;
   std::deque<ImageFrame> image_buffer_;
 
+  std::mutex feedback_log_mutex_;
+  std::ofstream feedback_log_file_;
+  std::string feedback_action_id_;
+  float feedback_goal_seconds_{0.0F};
+  std::string feedback_target_class_name_;
+  std::filesystem::path feedback_action_output_dir_;
+  std::filesystem::path feedback_log_path_;
+
   uint64_t frame_index_{0};
   std::unordered_map<std::string, TrackState> tracks_;
 };
@@ -321,4 +336,3 @@ private:
 }  // namespace detection_stability
 
 #endif  // DETECTION_STABILITY__DETECTION_STABILITY_NODE_HPP_
-

@@ -15,7 +15,6 @@ find_package(rclcpp_action REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
-fing_package(tf2_geomestry_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 
