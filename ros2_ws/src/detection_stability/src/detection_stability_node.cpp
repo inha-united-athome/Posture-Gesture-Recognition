@@ -1,9 +1,11 @@
 #include "detection_stability/detection_stability_node.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -13,6 +15,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #include "inha_interfaces/msg/posture_and_gesture_stability.hpp"
@@ -63,6 +66,52 @@ double median_copy(std::vector<double> values)
   return median_in_place(values);
 }
 
+std::optional<DepthStats> closest_depth_cluster(
+  std::vector<double> depths,
+  const int min_points,
+  const double tolerance_m)
+{
+  if (static_cast<int>(depths.size()) < min_points) {
+    return std::nullopt;
+  }
+
+  std::sort(depths.begin(), depths.end());
+  const double tolerance = safe_positive(tolerance_m, 0.30);
+
+  size_t best_begin = 0;
+  size_t best_end = 0;
+  for (size_t begin = 0; begin < depths.size(); ++begin) {
+    size_t end = begin + 1;
+    while (end < depths.size() && depths[end] - depths[begin] <= tolerance) {
+      ++end;
+    }
+    if (static_cast<int>(end - begin) >= min_points) {
+      best_begin = begin;
+      best_end = end;
+      break;
+    }
+  }
+
+  if (best_end <= best_begin) {
+    return std::nullopt;
+  }
+
+  std::vector<double> cluster(depths.begin() + best_begin, depths.begin() + best_end);
+  const double median = median_in_place(cluster);
+  std::vector<double> deviations;
+  deviations.reserve(cluster.size());
+  for (const auto depth : cluster) {
+    deviations.push_back(std::abs(depth - median));
+  }
+
+  DepthStats stats;
+  stats.has_depth = true;
+  stats.median_m = median;
+  stats.mad_m = median_in_place(deviations);
+  stats.point_count = static_cast<uint32_t>(cluster.size());
+  return stats;
+}
+
 std::string current_time_for_filename()
 {
   const auto now = std::chrono::system_clock::now();
@@ -98,6 +147,50 @@ std::string csv_escape(const std::string & value)
   }
   escaped.push_back('"');
   return escaped;
+}
+
+std::string trim_copy(const std::string & value)
+{
+  auto begin = value.begin();
+  while (begin != value.end() &&
+    std::isspace(static_cast<unsigned char>(*begin)))
+  {
+    ++begin;
+  }
+
+  auto end = value.end();
+  while (end != begin &&
+    std::isspace(static_cast<unsigned char>(*(end - 1))))
+  {
+    --end;
+  }
+
+  return std::string(begin, end);
+}
+
+std::vector<std::string> split_class_names(const std::string & value)
+{
+  std::vector<std::string> names;
+  std::string token;
+  for (const char ch : value) {
+    if (ch == ',' || ch == ';' || ch == '|' ||
+      std::isspace(static_cast<unsigned char>(ch)))
+    {
+      const auto trimmed = trim_copy(token);
+      if (!trimmed.empty()) {
+        names.push_back(trimmed);
+      }
+      token.clear();
+      continue;
+    }
+    token.push_back(ch);
+  }
+
+  const auto trimmed = trim_copy(token);
+  if (!trimmed.empty()) {
+    names.push_back(trimmed);
+  }
+  return names;
 }
 
 BBox bbox_from_msg(const vision_msgs::msg::BoundingBox2D & msg)
@@ -152,6 +245,9 @@ DetectionStabilityNode::DetectionStabilityNode()
   output_topic_ = this->declare_parameter<std::string>("output_topic", "/gesture_and_posture/detection_stability");
   image_topic_ =
     this->declare_parameter<std::string>("image_topic", "/camera/camera_head/color/image_raw/compressed");
+  instance_mask_topic_ =
+    this->declare_parameter<std::string>(
+    "instance_mask_topic", "/gesture_and_posture/person_instance_mask");
   selected_point_topic_ =
     this->declare_parameter<std::string>("selected_point_topic", "/gesture_and_posture/selected_person/point");
   selected_image_path_ =
@@ -160,6 +256,9 @@ DetectionStabilityNode::DetectionStabilityNode()
     this->declare_parameter<bool>("feedback_log_enabled", feedback_log_enabled_);
   feedback_log_root_dir_ =
     this->declare_parameter<std::string>("feedback_log_root_dir", "/home/thor/inha_log/module/gesture_and_posture/detection_stability_logs");
+  yolo_instance_seg_enable_service_ =
+    this->declare_parameter<std::string>(
+    "yolo_instance_seg_enable_service", "/yolo_instance_seg_node/set_enable");
   action_name_ =
     this->declare_parameter<std::string>("action_name", "select_stable_person");
   camera_frame_ = this->declare_parameter<std::string>("camera_frame", "camera_head_color_optical_frame");
@@ -173,6 +272,16 @@ DetectionStabilityNode::DetectionStabilityNode()
   min_lidar_points_ = this->declare_parameter<int>("min_lidar_points", 5);
   lidar_point_step_ = this->declare_parameter<int>("lidar_point_step", 2);
   max_projected_lidar_points_ = this->declare_parameter<int>("max_projected_lidar_points", 4000);
+  use_instance_mask_depth_ =
+    this->declare_parameter<bool>("use_instance_mask_depth", use_instance_mask_depth_);
+  enable_yolo_instance_seg_on_selection_ =
+    this->declare_parameter<bool>(
+    "enable_yolo_instance_seg_on_selection", enable_yolo_instance_seg_on_selection_);
+  max_instance_mask_age_sec_ =
+    this->declare_parameter<double>("max_instance_mask_age_sec", max_instance_mask_age_sec_);
+  instance_depth_cluster_tolerance_m_ =
+    this->declare_parameter<double>(
+    "instance_depth_cluster_tolerance_m", instance_depth_cluster_tolerance_m_);
   manual_camera_width_ =
     this->declare_parameter<int>("manual_camera_width", manual_camera_width_);
   manual_camera_height_ =
@@ -211,6 +320,8 @@ DetectionStabilityNode::DetectionStabilityNode()
     this->declare_parameter<double>("default_min_stability_score", 0.70);
   depth_tie_tolerance_m_ =
     this->declare_parameter<double>("depth_tie_tolerance_m", 0.25);
+  min_class_frame_ratio_ =
+    this->declare_parameter<double>("min_class_frame_ratio", min_class_frame_ratio_);
   crop_margin_ratio_ =
     this->declare_parameter<double>("crop_margin_ratio", 0.15);
   min_selection_observations_ =
@@ -227,6 +338,10 @@ DetectionStabilityNode::DetectionStabilityNode()
   selected_point_pub_ =
     this->create_publisher<geometry_msgs::msg::PointStamped>(
     selected_point_topic_, rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
+  if (enable_yolo_instance_seg_on_selection_) {
+    yolo_instance_seg_enable_client_ =
+      this->create_client<inha_interfaces::srv::SetEnable>(yolo_instance_seg_enable_service_);
+  }
 
   select_action_server_ = rclcpp_action::create_server<SelectStablePerson>(
     this,
@@ -239,11 +354,13 @@ DetectionStabilityNode::DetectionStabilityNode()
   RCLCPP_INFO(
     this->get_logger(),
     "detection_stability_node ready: action=%s, detections=%s, camera_info=%s, "
-    "lidar_pointcloud=%s, image=%s, output=%s, selected_point=%s. "
+    "lidar_pointcloud=%s, image=%s, output=%s, selected_point=%s, "
+    "yolo_enable_service=%s. "
     "Input subscriptions stay idle until start=true.",
     action_name_.c_str(),
     detections_topic_.c_str(), camera_info_topic_.c_str(), lidar_topic_.c_str(),
-    image_topic_.c_str(), output_topic_.c_str(), selected_point_topic_.c_str());
+    image_topic_.c_str(), output_topic_.c_str(), selected_point_topic_.c_str(),
+    enable_yolo_instance_seg_on_selection_ ? yolo_instance_seg_enable_service_.c_str() : "disabled");
 }
 
 rclcpp_action::GoalResponse DetectionStabilityNode::handle_select_goal(
@@ -411,6 +528,8 @@ void DetectionStabilityNode::start_input_subscriptions()
     return;
   }
 
+  set_yolo_instance_seg_enabled(true);
+
   {
     std::lock_guard<std::mutex> camera_lock(camera_info_mutex_);
     if (!latest_camera_info_) {
@@ -425,6 +544,13 @@ void DetectionStabilityNode::start_input_subscriptions()
     this->create_subscription<sensor_msgs::msg::CompressedImage>(
     image_topic_, rclcpp::SensorDataQoS(),
     std::bind(&DetectionStabilityNode::on_image, this, std::placeholders::_1));
+
+  if (use_instance_mask_depth_) {
+    instance_mask_sub_ =
+      this->create_subscription<sensor_msgs::msg::Image>(
+      instance_mask_topic_, rclcpp::SensorDataQoS(),
+      std::bind(&DetectionStabilityNode::on_instance_mask, this, std::placeholders::_1));
+  }
 
   filtered_detections_sub_.subscribe(this, detections_topic_, rmw_qos_profile_sensor_data);
   filtered_cloud_sub_.subscribe(this, lidar_topic_, rmw_qos_profile_sensor_data);
@@ -442,8 +568,10 @@ void DetectionStabilityNode::start_input_subscriptions()
 
   RCLCPP_INFO(
     this->get_logger(),
-    "Selection input subscriptions started: detections=%s, lidar=%s, image=%s",
-    detections_topic_.c_str(), lidar_topic_.c_str(), image_topic_.c_str());
+    "Selection input subscriptions started: detections=%s, lidar=%s, image=%s, "
+    "instance_mask=%s",
+    detections_topic_.c_str(), lidar_topic_.c_str(), image_topic_.c_str(),
+    use_instance_mask_depth_ ? instance_mask_topic_.c_str() : "disabled");
 }
 
 void DetectionStabilityNode::stop_input_subscriptions()
@@ -453,6 +581,7 @@ void DetectionStabilityNode::stop_input_subscriptions()
   filtered_detections_sub_.unsubscribe();
   filtered_cloud_sub_.unsubscribe();
   image_sub_.reset();
+  instance_mask_sub_.reset();
   bool has_camera_info = false;
   {
     std::lock_guard<std::mutex> camera_lock(camera_info_mutex_);
@@ -461,7 +590,48 @@ void DetectionStabilityNode::stop_input_subscriptions()
   if (!has_camera_info) {
     camera_info_sub_.reset();
   }
+  set_yolo_instance_seg_enabled(false);
   inputs_active_ = false;
+}
+
+void DetectionStabilityNode::set_yolo_instance_seg_enabled(bool enabled)
+{
+  if (!enable_yolo_instance_seg_on_selection_ || !yolo_instance_seg_enable_client_) {
+    return;
+  }
+
+  if (!yolo_instance_seg_enable_client_->service_is_ready()) {
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(),
+      *this->get_clock(),
+      5000,
+      "YOLO instance segmentation enable service is not ready: %s",
+      yolo_instance_seg_enable_service_.c_str());
+    return;
+  }
+
+  auto request = std::make_shared<inha_interfaces::srv::SetEnable::Request>();
+  request->enable = enabled;
+  yolo_instance_seg_enable_client_->async_send_request(
+    request,
+    [this, enabled](rclcpp::Client<inha_interfaces::srv::SetEnable>::SharedFuture future) {
+      try {
+        const auto response = future.get();
+        if (!response->success) {
+          RCLCPP_WARN(
+            this->get_logger(),
+            "YOLO instance segmentation %s request failed: %s",
+            enabled ? "enable" : "disable",
+            response->message.c_str());
+        }
+      } catch (const std::exception & exc) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "YOLO instance segmentation %s request failed: %s",
+          enabled ? "enable" : "disable",
+          exc.what());
+      }
+    });
 }
 
 void DetectionStabilityNode::request_stop_selection()
@@ -477,6 +647,7 @@ void DetectionStabilityNode::reset_selection_state(const SelectStablePerson::Goa
 {
   std::lock_guard<std::mutex> lock(selection_mutex_);
   target_class_name_ = goal.class_name;
+  target_class_names_ = split_class_names(target_class_name_);
   active_min_class_score_ = goal.min_class_score > 0.0F ?
     goal.min_class_score : static_cast<float>(default_min_class_score_);
   active_min_stability_score_ = goal.min_stability_score > 0.0F ?
@@ -486,7 +657,12 @@ void DetectionStabilityNode::reset_selection_state(const SelectStablePerson::Goa
   stop_selection_requested_ = false;
   selection_active_ = true;
   candidate_summaries_.clear();
+  selection_track_stats_.clear();
   image_buffer_.clear();
+  {
+    std::lock_guard<std::mutex> mask_lock(instance_mask_mutex_);
+    latest_instance_mask_.reset();
+  }
 }
 
 void DetectionStabilityNode::sanitize_parameters()
@@ -499,6 +675,9 @@ void DetectionStabilityNode::sanitize_parameters()
   min_lidar_points_ = std::max(1, min_lidar_points_);
   lidar_point_step_ = std::max(1, lidar_point_step_);
   max_projected_lidar_points_ = std::max(0, max_projected_lidar_points_);
+  max_instance_mask_age_sec_ = std::max(0.0, max_instance_mask_age_sec_);
+  instance_depth_cluster_tolerance_m_ =
+    safe_positive(instance_depth_cluster_tolerance_m_, 0.30);
   manual_camera_width_ = std::max(0, manual_camera_width_);
   manual_camera_height_ = std::max(0, manual_camera_height_);
   manual_camera_fx_ = std::max(0.0, manual_camera_fx_);
@@ -519,6 +698,7 @@ void DetectionStabilityNode::sanitize_parameters()
   default_min_class_score_ = clamp01(default_min_class_score_);
   default_min_stability_score_ = clamp01(default_min_stability_score_);
   depth_tie_tolerance_m_ = std::max(0.0, depth_tie_tolerance_m_);
+  min_class_frame_ratio_ = clamp01(min_class_frame_ratio_);
   crop_margin_ratio_ = std::max(0.0, crop_margin_ratio_);
   min_selection_observations_ = std::max(1, min_selection_observations_);
   image_buffer_size_ = std::max(1, image_buffer_size_);
@@ -611,6 +791,26 @@ sensor_msgs::msg::CameraInfo::ConstSharedPtr DetectionStabilityNode::current_cam
   return camera_info;
 }
 
+std::optional<InstanceMaskFrame> DetectionStabilityNode::current_instance_mask(
+  const rclcpp::Time & target_stamp) const
+{
+  std::lock_guard<std::mutex> lock(instance_mask_mutex_);
+  if (!latest_instance_mask_) {
+    return std::nullopt;
+  }
+
+  if (max_instance_mask_age_sec_ > 0.0 && target_stamp.nanoseconds() > 0 &&
+    latest_instance_mask_->stamp.nanoseconds() > 0)
+  {
+    const double age = std::abs((target_stamp - latest_instance_mask_->stamp).seconds());
+    if (age > max_instance_mask_age_sec_) {
+      return std::nullopt;
+    }
+  }
+
+  return latest_instance_mask_;
+}
+
 void DetectionStabilityNode::on_image(
   const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg)
 {
@@ -623,6 +823,49 @@ void DetectionStabilityNode::on_image(
   while (image_buffer_.size() > static_cast<size_t>(image_buffer_size_)) {
     image_buffer_.pop_front();
   }
+}
+
+void DetectionStabilityNode::on_instance_mask(
+  const sensor_msgs::msg::Image::ConstSharedPtr msg)
+{
+  if (!msg || msg->width == 0 || msg->height == 0) {
+    return;
+  }
+  if (msg->encoding != "mono16" && msg->encoding != "16UC1") {
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(), *this->get_clock(), 5000,
+      "Instance mask encoding must be mono16 or 16UC1, got '%s'.",
+      msg->encoding.c_str());
+    return;
+  }
+
+  const size_t expected_min_size =
+    static_cast<size_t>(msg->step) * static_cast<size_t>(msg->height);
+  if (msg->step < msg->width * sizeof(uint16_t) || msg->data.size() < expected_min_size) {
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(), *this->get_clock(), 5000,
+      "Instance mask dimensions are inconsistent: width=%u height=%u step=%u data=%zu.",
+      msg->width, msg->height, msg->step, msg->data.size());
+    return;
+  }
+
+  InstanceMaskFrame frame;
+  frame.stamp = rclcpp::Time(msg->header.stamp);
+  frame.width = msg->width;
+  frame.height = msg->height;
+  frame.labels.assign(static_cast<size_t>(frame.width) * frame.height, 0U);
+
+  for (uint32_t y = 0; y < frame.height; ++y) {
+    const auto * row = msg->data.data() + static_cast<size_t>(y) * msg->step;
+    for (uint32_t x = 0; x < frame.width; ++x) {
+      uint16_t label = 0;
+      std::memcpy(&label, row + static_cast<size_t>(x) * sizeof(uint16_t), sizeof(uint16_t));
+      frame.labels[static_cast<size_t>(y) * frame.width + x] = label;
+    }
+  }
+
+  std::lock_guard<std::mutex> lock(instance_mask_mutex_);
+  latest_instance_mask_ = std::move(frame);
 }
 
 void DetectionStabilityNode::on_point_cloud_pair(
@@ -685,6 +928,8 @@ void DetectionStabilityNode::process_detections(
   const auto search_bbox = make_search_bbox(contexts);
   const auto projected_lidar =
     project_lidar_once(camera_info, cloud, msg->header.frame_id, target_stamp, search_bbox);
+  const auto instance_mask =
+    use_instance_mask_depth_ ? current_instance_mask(target_stamp) : std::nullopt;
 
   for (const auto & context : contexts) {
     const auto & detection = msg->detections[context.index];
@@ -692,7 +937,10 @@ void DetectionStabilityNode::process_detections(
     const bool has_prior = prior_it != tracks_.end();
     const TrackState prior = has_prior ? prior_it->second : TrackState();
 
-    const auto depth_stats = compute_depth_stats(context.bbox, projected_lidar);
+    const auto depth_stats = compute_depth_stats(
+      context.bbox,
+      projected_lidar,
+      instance_mask ? &(*instance_mask) : nullptr);
     const double depth_cost = compute_depth_cost(depth_stats, has_prior ? &prior : nullptr);
     const double bbox_cost = compute_bbox_cost(context.bbox, has_prior ? &prior : nullptr);
     const double id_cost =
@@ -798,8 +1046,15 @@ void DetectionStabilityNode::update_active_selection(
 
     for (const auto & stability : output.stabilities) {
       const double class_score = extract_class_score(stability);
+      auto & track_stats = selection_track_stats_[stability.track_id];
+      track_stats.total_observations += 1;
+      const bool class_matched = class_matches(stability.class_name);
+      if (class_matched) {
+        track_stats.class_observations += 1;
+      }
+
       std::string reject_reason;
-      if (!class_matches(stability.class_name)) {
+      if (!class_matched) {
         reject_reason = "class_mismatch";
         write_feedback_log_line(
           make_log_line(stability, class_score, nullptr, false, reject_reason));
@@ -922,7 +1177,13 @@ void DetectionStabilityNode::write_feedback_log_line(const std::string & line)
 
 bool DetectionStabilityNode::class_matches(const std::string & class_name) const
 {
-  return target_class_name_.empty() || class_name == target_class_name_;
+  if (target_class_names_.empty()) {
+    return true;
+  }
+
+  return std::find(
+    target_class_names_.begin(), target_class_names_.end(), class_name) !=
+    target_class_names_.end();
 }
 
 double DetectionStabilityNode::extract_class_score(
@@ -974,6 +1235,17 @@ std::optional<CandidateSummary> DetectionStabilityNode::choose_best_candidate_lo
     if (candidate.observations < static_cast<uint32_t>(min_selection_observations_) ||
       candidate.depths_m.empty())
     {
+      continue;
+    }
+
+    const auto stats_it = selection_track_stats_.find(candidate.track_id);
+    const auto total_observations = stats_it != selection_track_stats_.end() ?
+      stats_it->second.total_observations : candidate.observations;
+    const auto class_observations = stats_it != selection_track_stats_.end() ?
+      stats_it->second.class_observations : candidate.observations;
+    const double class_frame_ratio = total_observations > 0 ?
+      static_cast<double>(class_observations) / static_cast<double>(total_observations) : 0.0;
+    if (class_frame_ratio < min_class_frame_ratio_) {
       continue;
     }
 
@@ -1251,10 +1523,64 @@ ProjectedLidar DetectionStabilityNode::project_lidar_once(
 
 DepthStats DetectionStabilityNode::compute_depth_stats(
   const BBox & bbox,
-  const ProjectedLidar & projected_lidar) const
+  const ProjectedLidar & projected_lidar,
+  const InstanceMaskFrame * instance_mask) const
 {
   DepthStats stats;
   if (!projected_lidar.valid) {
+    return stats;
+  }
+
+  if (instance_mask != nullptr && instance_mask->width > 0 && instance_mask->height > 0 &&
+    !instance_mask->labels.empty())
+  {
+    std::unordered_map<uint16_t, std::vector<double>> depths_by_instance;
+    uint32_t mask_point_count = 0;
+    auto begin = std::lower_bound(
+      projected_lidar.points.begin(), projected_lidar.points.end(), bbox.min_x,
+      [](const ProjectedPoint & point, const double u) {
+        return point.u < u;
+      });
+
+    for (auto it = begin; it != projected_lidar.points.end() && it->u <= bbox.max_x; ++it) {
+      if (it->v < bbox.min_y || it->v > bbox.max_y) {
+        continue;
+      }
+      const int x = static_cast<int>(std::lround(it->u));
+      const int y = static_cast<int>(std::lround(it->v));
+      if (x < 0 || y < 0 ||
+        x >= static_cast<int>(instance_mask->width) ||
+        y >= static_cast<int>(instance_mask->height))
+      {
+        continue;
+      }
+
+      const auto label =
+        instance_mask->labels[static_cast<size_t>(y) * instance_mask->width + x];
+      if (label == 0U) {
+        continue;
+      }
+      ++mask_point_count;
+      depths_by_instance[label].push_back(it->depth_m);
+    }
+    stats.point_count = mask_point_count;
+
+    std::optional<DepthStats> closest_instance;
+    for (auto & [label, depths] : depths_by_instance) {
+      (void)label;
+      auto candidate = closest_depth_cluster(
+        std::move(depths), min_lidar_points_, instance_depth_cluster_tolerance_m_);
+      if (!candidate) {
+        continue;
+      }
+      if (!closest_instance || candidate->median_m < closest_instance->median_m) {
+        closest_instance = *candidate;
+      }
+    }
+
+    if (closest_instance) {
+      return *closest_instance;
+    }
     return stats;
   }
 

@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -14,6 +16,7 @@
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "inha_interfaces/action/select_stable_person.hpp"
 #include "inha_interfaces/msg/posture_and_gesture_stability_array.hpp"
+#include "inha_interfaces/srv/set_enable.hpp"
 #include "message_filters/subscriber.h"
 #include "message_filters/sync_policies/approximate_time.h"
 #include "message_filters/synchronizer.h"
@@ -21,6 +24,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/compressed_image.hpp"
+#include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2_ros/buffer.h"
@@ -120,10 +124,24 @@ struct CandidateSummary
   double selected_depth_m{0.0};
 };
 
+struct SelectionTrackStats
+{
+  uint32_t total_observations{0};
+  uint32_t class_observations{0};
+};
+
 struct ImageFrame
 {
   rclcpp::Time stamp;
   sensor_msgs::msg::CompressedImage::ConstSharedPtr msg;
+};
+
+struct InstanceMaskFrame
+{
+  rclcpp::Time stamp;
+  uint32_t width{0};
+  uint32_t height{0};
+  std::vector<uint16_t> labels;
 };
 
 class DetectionStabilityNode : public rclcpp::Node
@@ -154,10 +172,12 @@ private:
   void build_manual_camera_info();
   void start_input_subscriptions();
   void stop_input_subscriptions();
+  void set_yolo_instance_seg_enabled(bool enabled);
   void request_stop_selection();
   void reset_selection_state(const SelectStablePerson::Goal & goal);
   void on_camera_info(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg);
   void on_image(const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg);
+  void on_instance_mask(const sensor_msgs::msg::Image::ConstSharedPtr msg);
   void on_point_cloud_pair(
     const DetectionMsg::ConstSharedPtr & detections,
     const CloudMsg::ConstSharedPtr & cloud);
@@ -174,7 +194,8 @@ private:
     const BBox & search_bbox);
   DepthStats compute_depth_stats(
     const BBox & bbox,
-    const ProjectedLidar & projected_lidar) const;
+    const ProjectedLidar & projected_lidar,
+    const InstanceMaskFrame * instance_mask = nullptr) const;
   CameraProjection make_projection(
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info,
     const std::string & detection_frame) const;
@@ -212,6 +233,8 @@ private:
   std::string extract_track_id(const std::string & detection_id) const;
   std::string extract_class_name(const vision_msgs::msg::Detection2D & detection) const;
   sensor_msgs::msg::CameraInfo::ConstSharedPtr current_camera_info();
+  std::optional<InstanceMaskFrame> current_instance_mask(
+    const rclcpp::Time & target_stamp) const;
 
   void update_active_selection(
     const inha_interfaces::msg::PostureAndGestureStabilityArray & output);
@@ -229,17 +252,24 @@ private:
   bool save_selected_image(
     const CandidateSummary & selected,
     const sensor_msgs::msg::CompressedImage::ConstSharedPtr & image_msg) const;
+  void open_feedback_log(const SelectStablePerson::Goal & goal);
+  void close_feedback_log();
+  void write_feedback_log_line(const std::string & line);
 
   std::string detections_topic_;
   std::string camera_info_topic_;
   std::string lidar_topic_;
   std::string output_topic_;
   std::string image_topic_;
+  std::string instance_mask_topic_;
   std::string selected_point_topic_;
   std::string selected_image_path_;
   std::string action_name_;
   std::string camera_frame_;
   std::string output_frame_;
+  bool feedback_log_enabled_{true};
+  std::string feedback_log_root_dir_;
+  std::string yolo_instance_seg_enable_service_;
 
 
   int sync_queue_size_{10};
@@ -250,6 +280,10 @@ private:
   int min_lidar_points_{5};
   int lidar_point_step_{2};
   int max_projected_lidar_points_{4000};
+  bool use_instance_mask_depth_{true};
+  bool enable_yolo_instance_seg_on_selection_{true};
+  double max_instance_mask_age_sec_{0.50};
+  double instance_depth_cluster_tolerance_m_{0.30};
 
   int manual_camera_width_{640};
   int manual_camera_height_{480};
@@ -280,6 +314,7 @@ private:
   double default_min_class_score_{0.50};
   double default_min_stability_score_{0.70};
   double depth_tie_tolerance_m_{0.25};
+  double min_class_frame_ratio_{0.50};
   double crop_margin_ratio_{0.15};
   int min_selection_observations_{1};
   int image_buffer_size_{30};
@@ -289,8 +324,10 @@ private:
 
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
   rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr image_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr instance_mask_sub_;
   rclcpp::Publisher<inha_interfaces::msg::PostureAndGestureStabilityArray>::SharedPtr stability_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr selected_point_pub_;
+  rclcpp::Client<inha_interfaces::srv::SetEnable>::SharedPtr yolo_instance_seg_enable_client_;
   rclcpp_action::Server<SelectStablePerson>::SharedPtr select_action_server_;
 
   message_filters::Subscriber<DetectionMsg> filtered_detections_sub_;
@@ -309,10 +346,23 @@ private:
   bool selection_active_{false};
   bool stop_selection_requested_{false};
   std::string target_class_name_;
+  std::vector<std::string> target_class_names_;
   float active_min_class_score_{0.0F};
   float active_min_stability_score_{0.0F};
   std::unordered_map<std::string, CandidateSummary> candidate_summaries_;
+  std::unordered_map<std::string, SelectionTrackStats> selection_track_stats_;
   std::deque<ImageFrame> image_buffer_;
+
+  mutable std::mutex instance_mask_mutex_;
+  std::optional<InstanceMaskFrame> latest_instance_mask_;
+
+  std::mutex feedback_log_mutex_;
+  std::ofstream feedback_log_file_;
+  std::string feedback_action_id_;
+  float feedback_goal_seconds_{0.0F};
+  std::string feedback_target_class_name_;
+  std::filesystem::path feedback_action_output_dir_;
+  std::filesystem::path feedback_log_path_;
 
   uint64_t frame_index_{0};
   std::unordered_map<std::string, TrackState> tracks_;
@@ -321,4 +371,3 @@ private:
 }  // namespace detection_stability
 
 #endif  // DETECTION_STABILITY__DETECTION_STABILITY_NODE_HPP_
-
