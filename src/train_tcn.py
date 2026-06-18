@@ -38,12 +38,6 @@ def parse_args():
     parser.add_argument("--max_frames", type=int, default=120,
                         help="Max sequence length (pad/crop)")
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--num_workers", type=int, default=4,
-                        help="DataLoader workers. Use 0 for low-memory Windows training.")
-    parser.add_argument("--no_pin_memory", action="store_true",
-                        help="Disable DataLoader pin_memory.")
-    parser.add_argument("--no_augment", action="store_true",
-                        help="Disable train-time skeleton augmentation.")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=15,
@@ -126,14 +120,14 @@ def print_confusion_matrix(preds, labels, num_classes, class_names=None):
     for p, l in zip(preds, labels):
         cm[l][p] += 1
 
-    print("\n  Confusion Matrix")
-    header = "  " + "True\\Pred".ljust(14) + "".join(class_names[i].ljust(14) for i in range(num_classes))
+    print("\n  ┌─ Confusion Matrix ─────────────────────")
+    header = "  │ " + "True\\Pred".ljust(14) + "".join(class_names[i].ljust(14) for i in range(num_classes))
     print(header)
-    print("  " + "-" * (14 + 14 * num_classes))
+    print("  │ " + "─" * (14 + 14 * num_classes))
     for i in range(num_classes):
-        row = "  " + class_names[i].ljust(14) + "".join(str(cm[i][j]).ljust(14) for j in range(num_classes))
+        row = "  │ " + class_names[i].ljust(14) + "".join(str(cm[i][j]).ljust(14) for j in range(num_classes))
         print(row)
-    print("  " + "-" * (14 + 14 * num_classes))
+    print("  └─────────────────────────────────────────")
 
     print("\n  Per-Class Metrics:")
     for i in range(num_classes):
@@ -168,7 +162,7 @@ def main():
 
     train_dataset = NTUSkeletonDataset(
         pkl_path, split=train_split,
-        max_frames=args.max_frames, augment=not args.no_augment,
+        max_frames=args.max_frames, augment=True,
     )
     val_dataset = NTUSkeletonDataset(
         pkl_path, split=val_split,
@@ -177,13 +171,11 @@ def main():
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size,
-        shuffle=True, num_workers=args.num_workers,
-        pin_memory=not args.no_pin_memory,
+        shuffle=True, num_workers=4, pin_memory=True,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size,
-        shuffle=False, num_workers=args.num_workers,
-        pin_memory=not args.no_pin_memory,
+        shuffle=False, num_workers=4, pin_memory=True,
     )
 
     # ===== Model =====
@@ -237,8 +229,8 @@ def main():
 
         print(
             f"Epoch [{epoch:3d}/{args.epochs}]  "
-            f"Train Loss: {train_loss:.4f}  Acc: {train_acc:.4f}  |  "
-            f"Val Loss: {val_loss:.4f}  Acc: {val_acc:.4f}  |  "
+            f"Train Loss: {train_loss:.4f}  Acc: {train_acc:.4f}  │  "
+            f"Val Loss: {val_loss:.4f}  Acc: {val_acc:.4f}  │  "
             f"LR: {lr:.6f}"
         )
 
@@ -262,11 +254,11 @@ def main():
                 "max_frames": args.max_frames,
                 "split": args.split,
             }, save_path)
-            print(f"  Best model saved (Val Acc: {val_acc:.4f})")
+            print(f"  ✓ Best model saved (Val Acc: {val_acc:.4f})")
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
-                print(f"\n  Early stopping at epoch {epoch} "
+                print(f"\n  ✗ Early stopping at epoch {epoch} "
                       f"(no improvement for {args.patience} epochs)")
                 break
 
@@ -289,7 +281,7 @@ def main():
     class_names = [train_dataset.get_action_name(i) for i in range(num_classes)]
     print_confusion_matrix(val_preds, val_labels, num_classes, class_names)
 
-    print(f"\nTraining complete! Model saved to: {save_path}")
+    print(f"\n✓ Training complete! Model saved to: {save_path}")
 
 
 if __name__ == "__main__":

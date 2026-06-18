@@ -36,12 +36,10 @@ from utils.skeleton_ops import get_swap_pairs
 NTU_ACTION_NAMES = {
     0: "idle",
     1: "waving",
-    2: "left_handup",
-    3: "right_handup",
-    4: "hands_up_both",
-    5: "left_pointing",
-    6: "right_pointing",
-    7: "stop",
+    2: "hands_up_single",
+    3: "hands_up_both",
+    4: "pointing",
+    5: "stop",
 }
 
 
@@ -92,7 +90,7 @@ class NTUSkeletonDataset(Dataset):
         # Stats
         labels = [s["label"] for s in self.samples]
         self.label_counts = Counter(labels)
-        self.num_classes = max(self.label_counts.keys()) + 1 if self.label_counts else 0
+        self.num_classes = len(self.label_counts)
 
         print(f"[{split}] Loaded {len(self.samples)} samples, "
               f"{self.num_classes} classes, "
