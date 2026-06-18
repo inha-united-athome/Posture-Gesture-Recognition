@@ -23,6 +23,9 @@ custom_data/
 .idea/
 *.swp
 *.swo
+.agents/
+.codex/
+.claude/
 
 # ===== OS =====
 .DS_Store
@@ -37,12 +40,15 @@ Thumbs.db
 ros2_ws/install/
 ros2_ws/build/
 ros2_ws/log/
+ros2_ws/build_gw
+ros2_ws/log_gw
+ros2_ws/install_gw
 
 # ===== Misc =====
 *.log
 
 # ===== Communication =====
-temproal_communication/
+temporal_communication/
 
 # ===== etc =====
 log.txt

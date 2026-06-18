@@ -27,12 +27,12 @@ from utils.skeleton_ops import get_swap_pairs
 
 
 # ===== Final label mapping (6-class merged dataset) =====
-# 0: idle             — NTU (reading, writing, phone_call, playing_phone, typing)
-# 1: waving           — NTU A023 hand_waving
-# 2: hands_up_single  — 커스텀 수집 (한손 들기)
-# 3: hands_up_both    — NTU A095 capitulate (양손 들기)
-# 4: pointing         — NTU A031 pointing
-# 5: stop             — 커스텀 수집 (정지 제스처)
+# 0: idle             — 앉기/서기 등 유휴 동작
+# 1: waving           — 손 흔들기 (좌/우 합산)
+# 2: hands_up_single  — 한손 들기 (좌/우 합산)
+# 3: hands_up_both    — 양손 들기
+# 4: pointing         — 손가락 가리키기 (좌/우 합산)
+# 5: stop             — 정지 제스처
 NTU_ACTION_NAMES = {
     0: "idle",
     1: "waving",
