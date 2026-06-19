@@ -205,7 +205,8 @@ private:
     const rclcpp::Time & target_stamp,
     RigidTransform & transform);
   bool transform_point_to_output_frame(
-    geometry_msgs::msg::PointStamped & point) const;
+    geometry_msgs::msg::PointStamped & point,
+    std::string & failure_reason) const;
 
   void append_projected_cloud_points(
     const CloudMsg & cloud,
@@ -248,13 +249,22 @@ private:
   std::optional<CandidateSummary> choose_best_candidate_locked() const;
   sensor_msgs::msg::CompressedImage::ConstSharedPtr find_nearest_image(
     const rclcpp::Time & target_stamp);
-  bool publish_and_save_selection(const CandidateSummary & selected);
+  bool publish_and_save_selection(
+    const CandidateSummary & selected,
+    std::string & failure_reason);
   bool save_selected_image(
     const CandidateSummary & selected,
-    const sensor_msgs::msg::CompressedImage::ConstSharedPtr & image_msg) const;
+    const sensor_msgs::msg::CompressedImage::ConstSharedPtr & image_msg,
+    std::string & failure_reason) const;
   void open_feedback_log(const SelectStablePerson::Goal & goal);
   void close_feedback_log();
   void write_feedback_log_line(const std::string & line);
+  void write_result_log(
+    bool success,
+    const std::string & result_reason,
+    bool canceled,
+    bool stopped,
+    const CandidateSummary * selected);
 
   std::string detections_topic_;
   std::string camera_info_topic_;
@@ -352,6 +362,8 @@ private:
   std::unordered_map<std::string, CandidateSummary> candidate_summaries_;
   std::unordered_map<std::string, SelectionTrackStats> selection_track_stats_;
   std::deque<ImageFrame> image_buffer_;
+  uint64_t selection_processed_frames_{0};
+  uint64_t selection_image_frames_received_{0};
 
   mutable std::mutex instance_mask_mutex_;
   std::optional<InstanceMaskFrame> latest_instance_mask_;

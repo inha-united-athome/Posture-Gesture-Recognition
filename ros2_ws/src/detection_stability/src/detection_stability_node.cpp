@@ -1,6 +1,7 @@
 #include "detection_stability/detection_stability_node.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -255,7 +256,7 @@ DetectionStabilityNode::DetectionStabilityNode()
   feedback_log_enabled_ =
     this->declare_parameter<bool>("feedback_log_enabled", feedback_log_enabled_);
   feedback_log_root_dir_ =
-    this->declare_parameter<std::string>("feedback_log_root_dir", "/home/thor/inha_log/module/gesture_and_posture/detection_stability_logs");
+    this->declare_parameter<std::string>("feedback_log_root_dir", "/home/thor/inha_log/module/posture_and_gesture/detection_stability_logs");
   yolo_instance_seg_enable_service_ =
     this->declare_parameter<std::string>(
     "yolo_instance_seg_enable_service", "/yolo_instance_seg_node/set_enable");
@@ -480,18 +481,39 @@ void DetectionStabilityNode::execute_select_goal(
     }
   }
 
-  if (selected) {
+  std::string result_reason;
+  if (canceled) {
+    result_reason = "canceled";
+  } else if (stopped) {
+    result_reason = "stopped_by_start_false";
+  } else if (selected) {
     auto point = selected->point;
-    if (transform_point_to_output_frame(point)) {
+    if (transform_point_to_output_frame(point, result_reason)) {
       selected->point = point;
       result->best_point = point;
-      result->success = publish_and_save_selection(*selected);
+      result->success = publish_and_save_selection(*selected, result_reason);
+      if (result->success) {
+        result_reason = "success";
+      }
     } else {
       result->success = false;
     }
   } else {
     result->success = false;
+    std::lock_guard<std::mutex> lock(selection_mutex_);
+    if (selection_processed_frames_ == 0) {
+      result_reason = "no_synchronized_detection_lidar_frames";
+    } else if (selection_track_stats_.empty()) {
+      result_reason = "no_valid_detections";
+    } else if (candidate_summaries_.empty()) {
+      result_reason = "all_candidates_rejected";
+    } else {
+      result_reason = "no_eligible_candidate";
+    }
   }
+
+  write_result_log(
+    result->success, result_reason, canceled, stopped, selected ? &*selected : nullptr);
 
   {
     std::lock_guard<std::mutex> lock(selection_mutex_);
@@ -517,7 +539,10 @@ void DetectionStabilityNode::execute_select_goal(
   } else if (result->success) {
     RCLCPP_INFO(this->get_logger(), "Selection goal succeeded.");
   } else {
-    RCLCPP_WARN(this->get_logger(), "Selection goal finished without a saved selected person.");
+    RCLCPP_WARN(
+      this->get_logger(),
+      "Selection goal failed: action_id=%s reason=%s feedback=%s",
+      feedback_action_id_.c_str(), result_reason.c_str(), feedback_log_path_.string().c_str());
   }
 }
 
@@ -659,6 +684,8 @@ void DetectionStabilityNode::reset_selection_state(const SelectStablePerson::Goa
   candidate_summaries_.clear();
   selection_track_stats_.clear();
   image_buffer_.clear();
+  selection_processed_frames_ = 0;
+  selection_image_frames_received_ = 0;
   {
     std::lock_guard<std::mutex> mask_lock(instance_mask_mutex_);
     latest_instance_mask_.reset();
@@ -819,6 +846,7 @@ void DetectionStabilityNode::on_image(
     return;
   }
 
+  selection_image_frames_received_ += 1;
   image_buffer_.push_back({rclcpp::Time(msg->header.stamp), msg});
   while (image_buffer_.size() > static_cast<size_t>(image_buffer_size_)) {
     image_buffer_.pop_front();
@@ -1003,6 +1031,7 @@ void DetectionStabilityNode::update_active_selection(
     if (!selection_active_ || stop_selection_requested_ || !active_goal_) {
       return;
     }
+    selection_processed_frames_ += 1;
     goal_handle = active_goal_;
 
     const auto make_log_line =
@@ -1175,6 +1204,107 @@ void DetectionStabilityNode::write_feedback_log_line(const std::string & line)
   feedback_log_file_ << line << '\n';
 }
 
+void DetectionStabilityNode::write_result_log(
+  const bool success,
+  const std::string & result_reason,
+  const bool canceled,
+  const bool stopped,
+  const CandidateSummary * selected)
+{
+  if (!feedback_log_enabled_) {
+    return;
+  }
+
+  uint64_t processed_frames = 0;
+  uint64_t image_frames_received = 0;
+  uint64_t total_observations = 0;
+  uint64_t accepted_observations = 0;
+  size_t observed_tracks = 0;
+  size_t candidate_tracks = 0;
+  size_t image_frames_buffered = 0;
+  {
+    std::lock_guard<std::mutex> lock(selection_mutex_);
+    processed_frames = selection_processed_frames_;
+    image_frames_received = selection_image_frames_received_;
+    observed_tracks = selection_track_stats_.size();
+    candidate_tracks = candidate_summaries_.size();
+    image_frames_buffered = image_buffer_.size();
+    for (const auto & [track_id, stats] : selection_track_stats_) {
+      (void)track_id;
+      total_observations += stats.total_observations;
+    }
+    for (const auto & [track_id, candidate] : candidate_summaries_) {
+      (void)track_id;
+      accepted_observations += candidate.observations;
+    }
+  }
+
+  std::lock_guard<std::mutex> lock(feedback_log_mutex_);
+  if (feedback_action_output_dir_.empty()) {
+    RCLCPP_WARN(
+      this->get_logger(), "Cannot write selection result log: action output directory is empty.");
+    return;
+  }
+
+  const auto result_path = feedback_action_output_dir_ / "result.csv";
+  std::ofstream result_file(result_path, std::ios::out | std::ios::trunc);
+  if (!result_file.is_open()) {
+    const auto message = errno != 0 ?
+      std::error_code(errno, std::generic_category()).message() : "stream open failed";
+    RCLCPP_WARN(
+      this->get_logger(), "Failed to open selection result log %s: %s",
+      result_path.string().c_str(), message.c_str());
+    return;
+  }
+
+  result_file
+    << "action_id,goal_seconds,target_class,success,result_reason,canceled,stopped,"
+       "processed_frames,total_observations,accepted_observations,observed_tracks,"
+       "candidate_tracks,image_frames_received,image_frames_buffered,selected_track_id,"
+       "selected_class,selected_observations,selected_depth_m,selected_stamp_ns,point_frame,"
+       "output_frame,image_topic,selected_image_path,feedback_csv\n";
+  result_file << std::fixed << std::setprecision(6)
+              << csv_escape(feedback_action_id_) << ','
+              << feedback_goal_seconds_ << ','
+              << csv_escape(feedback_target_class_name_) << ','
+              << (success ? "true" : "false") << ','
+              << csv_escape(result_reason) << ','
+              << (canceled ? "true" : "false") << ','
+              << (stopped ? "true" : "false") << ','
+              << processed_frames << ','
+              << total_observations << ','
+              << accepted_observations << ','
+              << observed_tracks << ','
+              << candidate_tracks << ','
+              << image_frames_received << ','
+              << image_frames_buffered << ',';
+  if (selected) {
+    result_file << csv_escape(selected->track_id) << ','
+                << csv_escape(selected->class_name) << ','
+                << selected->observations << ','
+                << selected->selected_depth_m << ','
+                << selected->stamp.nanoseconds() << ','
+                << csv_escape(selected->point.header.frame_id) << ',';
+  } else {
+    result_file << ",,,,,,";
+  }
+  result_file << csv_escape(output_frame_) << ','
+              << csv_escape(image_topic_) << ','
+              << csv_escape(selected_image_path_) << ','
+              << csv_escape(feedback_log_path_.string()) << '\n';
+  result_file.flush();
+  if (!result_file) {
+    RCLCPP_WARN(
+      this->get_logger(), "Failed while writing selection result log %s",
+      result_path.string().c_str());
+    return;
+  }
+
+  RCLCPP_INFO(
+    this->get_logger(), "Selection result log saved to %s (success=%s reason=%s)",
+    result_path.string().c_str(), success ? "true" : "false", result_reason.c_str());
+}
+
 bool DetectionStabilityNode::class_matches(const std::string & class_name) const
 {
   if (target_class_names_.empty()) {
@@ -1300,7 +1430,8 @@ sensor_msgs::msg::CompressedImage::ConstSharedPtr DetectionStabilityNode::find_n
 }
 
 bool DetectionStabilityNode::transform_point_to_output_frame(
-  geometry_msgs::msg::PointStamped & point) const
+  geometry_msgs::msg::PointStamped & point,
+  std::string & failure_reason) const
 {
   if (output_frame_.empty() || point.header.frame_id == output_frame_) {
     return true;
@@ -1310,6 +1441,7 @@ bool DetectionStabilityNode::transform_point_to_output_frame(
     point = tf_buffer_.transform(point, output_frame_, timeout);
     return true;
   } catch (const tf2::TransformException & ex) {
+    failure_reason = "tf_transform_failed: " + std::string(ex.what());
     RCLCPP_WARN(
       this->get_logger(),
       "Cannot transform selected point from '%s' to '%s': %s",
@@ -1318,20 +1450,23 @@ bool DetectionStabilityNode::transform_point_to_output_frame(
   }
 }
 
-bool DetectionStabilityNode::publish_and_save_selection(const CandidateSummary & selected)
+bool DetectionStabilityNode::publish_and_save_selection(
+  const CandidateSummary & selected,
+  std::string & failure_reason)
 {
   selected_point_pub_->publish(selected.point);
 
   const auto image_msg = find_nearest_image(selected.stamp);
   if (!image_msg) {
+    failure_reason = "image_buffer_empty";
     RCLCPP_WARN(
       this->get_logger(),
-      "Selected track %s at %.3fm, but no compressed image was buffered.",
-      selected.track_id.c_str(), selected.selected_depth_m);
+      "Selected track %s at %.3fm, but no compressed image was buffered from %s.",
+      selected.track_id.c_str(), selected.selected_depth_m, image_topic_.c_str());
     return false;
   }
 
-  const bool saved = save_selected_image(selected, image_msg);
+  const bool saved = save_selected_image(selected, image_msg, failure_reason);
   if (saved) {
     RCLCPP_INFO(
       this->get_logger(),
@@ -1346,9 +1481,13 @@ bool DetectionStabilityNode::publish_and_save_selection(const CandidateSummary &
 
 bool DetectionStabilityNode::save_selected_image(
   const CandidateSummary & selected,
-  const sensor_msgs::msg::CompressedImage::ConstSharedPtr & image_msg) const
+  const sensor_msgs::msg::CompressedImage::ConstSharedPtr & image_msg,
+  std::string & failure_reason) const
 {
   if (!image_msg || image_msg->data.empty()) {
+    failure_reason = "selected_image_message_empty";
+    RCLCPP_WARN(
+      this->get_logger(), "Cannot save selected image: compressed image message is empty.");
     return false;
   }
 
@@ -1357,6 +1496,7 @@ bool DetectionStabilityNode::save_selected_image(
     std::error_code error;
     std::filesystem::create_directories(output_path.parent_path(), error);
     if (error) {
+      failure_reason = "image_directory_create_failed: " + error.message();
       RCLCPP_WARN(
         this->get_logger(), "Failed to create image output directory %s: %s",
         output_path.parent_path().string().c_str(), error.message().c_str());
@@ -1365,14 +1505,30 @@ bool DetectionStabilityNode::save_selected_image(
   }
 
   const auto write_compressed_frame = [&]() {
+      errno = 0;
       std::ofstream output(output_path.string(), std::ios::binary);
       if (!output) {
+        const auto message = errno != 0 ?
+          std::error_code(errno, std::generic_category()).message() : "stream open failed";
+        failure_reason = "image_file_open_failed: " + message;
+        RCLCPP_WARN(
+          this->get_logger(), "Failed to open selected image path %s: %s",
+          output_path.string().c_str(), message.c_str());
         return false;
       }
       output.write(
         reinterpret_cast<const char *>(image_msg->data.data()),
         static_cast<std::streamsize>(image_msg->data.size()));
-      return static_cast<bool>(output);
+      if (!output) {
+        const auto message = errno != 0 ?
+          std::error_code(errno, std::generic_category()).message() : "stream write failed";
+        failure_reason = "image_file_write_failed: " + message;
+        RCLCPP_WARN(
+          this->get_logger(), "Failed while writing selected image %s: %s",
+          output_path.string().c_str(), message.c_str());
+        return false;
+      }
+      return true;
     };
 
 #ifdef DETECTION_STABILITY_HAVE_OPENCV
