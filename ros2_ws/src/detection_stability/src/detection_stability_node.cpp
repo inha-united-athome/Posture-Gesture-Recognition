@@ -1369,12 +1369,14 @@ std::optional<CandidateSummary> DetectionStabilityNode::choose_best_candidate_lo
     }
 
     const auto stats_it = selection_track_stats_.find(candidate.track_id);
-    const auto total_observations = stats_it != selection_track_stats_.end() ?
-      stats_it->second.total_observations : candidate.observations;
     const auto class_observations = stats_it != selection_track_stats_.end() ?
       stats_it->second.class_observations : candidate.observations;
-    const double class_frame_ratio = total_observations > 0 ?
-      static_cast<double>(class_observations) / static_cast<double>(total_observations) : 0.0;
+    const double class_frame_ratio =
+      selection_processed_frames_ > 0 ?
+      clamp01(
+        static_cast<double>(class_observations) /
+        static_cast<double>(selection_processed_frames_)) :
+      0.0;
     if (class_frame_ratio < min_class_frame_ratio_) {
       continue;
     }

@@ -1,0 +1,92 @@
+yolo_instance_seg_node:
+  ros__parameters:
+    input_topic: /camera/camera_head/color/image_raw/compressed
+    output_topic: /gesture_and_posture/person_instance_mask
+    debug_image_topic: /gesture_and_posture/person_instance_mask/debug/compressed
+    publish_debug_image: true
+    enable_service_name: /yolo_instance_seg_node/set_enable
+    initially_enabled: false
+    model_path: yolo26n-seg.pt
+    device: cuda
+    conf: 0.35
+    iou: 0.50
+    imgsz: 640
+    erode_pixels: 3
+    use_sim_time: false
+
+detection_stability_node:
+  ros__parameters:
+    # Topics and outputs
+    detections_topic: /gesture_and_posture/detection/detections
+    camera_info_topic: /camera/camera_head/color/camera_info
+    lidar_topic: /livox/lidar
+    output_topic: /gesture_and_posture/detection_stability
+    image_topic: /camera/camera_head/color/image_raw/compressed
+    instance_mask_topic: /gesture_and_posture/person_instance_mask
+    selected_point_topic: /gesture_and_posture/selected_person/point
+    selected_image_path: /home/thor/inha_log/selected_person.jpg
+    feedback_log_enabled: true
+    feedback_log_root_dir: /home/thor/inha_log/module/posture_and_gesture/detection_stability_logs
+    yolo_instance_seg_enable_service: /yolo_instance_seg_node/set_enable
+    action_name: select_stable_person
+    camera_frame: camera_head_color_optical_frame
+    output_frame: map
+
+    # Synchronization, transforms, and LiDAR filtering
+    sync_queue_size: 10
+    max_lidar_age_sec: 0.25
+    transform_timeout_sec: 0.1
+    min_depth_m: 0.10
+    max_depth_m: 30.0
+    min_lidar_points: 5
+    lidar_point_step: 2
+    max_projected_lidar_points: 4000
+
+    # Instance-mask depth estimation
+    use_instance_mask_depth: true
+    enable_yolo_instance_seg_on_selection: true
+    max_instance_mask_age_sec: 0.50
+    instance_depth_cluster_tolerance_m: 0.30
+
+    # Fallback camera intrinsics
+    manual_camera_width: 640
+    manual_camera_height: 480
+    manual_camera_fx: 605.784249722
+    manual_camera_fy: 604.492919921875
+    manual_camera_cx: 323.7266845
+    manual_camera_cy: 250.73828125
+
+    # Depth stability score
+    depth_spread_tolerance: 0.08
+    depth_jump_tolerance_m: 0.40
+    depth_spread_weight: 0.70
+    depth_jump_weight: 0.30
+
+    # Bounding-box stability score
+    bbox_center_tolerance: 0.35
+    bbox_size_tolerance: 0.35
+    bbox_center_weight: 0.70
+    bbox_size_weight: 0.30
+
+    # Track and ID stability
+    stable_age_frames: 10
+    max_missing_frames: 30
+    id_switch_memory_frames: 5
+    id_switch_iou_threshold: 0.50
+
+    # Total stability score
+    total_depth_weight: 0.45
+    total_bbox_weight: 0.35
+    total_id_weight: 0.20
+
+    # Person selection
+    default_min_class_score: 0.50
+    default_min_stability_score: 0.70
+    depth_tie_tolerance_m: 0.25
+    min_class_frame_ratio: 0.20
+    crop_margin_ratio: 0.15
+    min_selection_observations: 1
+    image_buffer_size: 30
+
+    # ROS clock
+    use_sim_time: false
