@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -59,7 +60,7 @@ def generate_launch_description():
                 "image_transport": image_transport,
                 "service_name": "set_recording",
                 "output_root_dir": recorder_output_dir,
-                "video_fps": recorder_fps,
+                "video_fps": ParameterValue(recorder_fps, value_type=float),
                 "video_fourcc": "mp4v",
             }],
         ),
