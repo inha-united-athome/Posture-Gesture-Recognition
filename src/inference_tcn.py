@@ -91,6 +91,12 @@ def parse_args():
                         help="Keep disconnected tracks reconnectable for N frames")
     parser.add_argument("--ttl_frames", type=int, default=45,
                         help="Remove track if missing for more than N frames")
+    parser.add_argument("--min_infer_frames", type=int, default=30,
+                        help="Minimum buffered frames before running TCN (warm-up). "
+                             "Higher = fewer false positives from short windows (default: 30)")
+    parser.add_argument("--window_sec", type=float, default=2.0,
+                        help="Time-based buffer window in seconds (fps-invariant resampling). "
+                             "0 to disable, falling back to frame-based (default: 2.0)")
     return parser.parse_args()
 
 
@@ -294,8 +300,8 @@ def main():
                     if tid not in tracks:
                         tracks[tid] = TrackState(buf_size=args.buf_size)
                     
-                    # 버퍼에 추가 및 상태 업데이트
-                    tracks[tid].buffer.append(kp_norm)
+                    # 버퍼에 추가 및 상태 업데이트 (시간 기반 리샘플용 timestamp 포함)
+                    tracks[tid].push(kp_norm, t_start)
                     kp_px = keypoints[det_idx][:17]  # 17 body joints
                     update_track_from_keypoints(tracks[tid], kp_px, det_centers[det_idx], frame_count)
 
@@ -306,14 +312,14 @@ def main():
                 # 최근 관측된 track 우선으로 배치 추론
                 infer_candidates = [
                     (tid, tr) for tid, tr in tracks.items()
-                    if (frame_count - tr.last_seen_frame) <= 1 and len(tr.buffer) >= 5
+                    if (frame_count - tr.last_seen_frame) <= 1 and len(tr.buffer) >= args.min_infer_frames
                 ]
                 infer_candidates.sort(key=lambda x: x[1].bbox_area, reverse=True)
                 infer_candidates = infer_candidates[:args.max_tracks_infer]
 
                 pred_map = predict_tcn_batch(
                     model, infer_candidates, max_frames, num_classes, device,
-                    num_joints=num_joints
+                    num_joints=num_joints, window_sec=args.window_sec
                 )
                 for tid, (pred_cls, pred_conf, pred_probs) in pred_map.items():
                     tracks[tid].pred_cls = pred_cls

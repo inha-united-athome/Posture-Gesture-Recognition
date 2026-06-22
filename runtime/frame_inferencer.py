@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -213,6 +214,7 @@ class TCNFrameInferencer:
         grace_frames=15,
         ttl_frames=45,
         kpt_thr=0.4,
+        window_sec=2.0,
         class_colors=None,
     ):
         self.model = model
@@ -227,6 +229,8 @@ class TCNFrameInferencer:
         self.grace_frames = max(0, int(grace_frames))
         self.ttl_frames = max(self.grace_frames + 1, int(ttl_frames))
         self.kpt_thr = float(kpt_thr)
+        # window_sec>0 이면 시간 기반 버퍼 활성화(fps 무관). None/0 이면 기존 프레임 기반.
+        self.window_sec = float(window_sec) if window_sec else None
         self.class_colors = class_colors or {"unknown": (80, 80, 80)}
 
         self.tracker = init_pose_tracker(
@@ -243,9 +247,11 @@ class TCNFrameInferencer:
         self.next_tid = 0
         self.tracks = TrackManager()
 
-    def infer(self, frame, return_debug_image=True):
+    def infer(self, frame, return_debug_image=True, timestamp=None):
         from rtmlib import draw_skeleton
 
+        if timestamp is None:
+            timestamp = time.time()
         self.frame_count += 1
         keypoints, scores = self.tracker(frame)
         detections = []
@@ -283,7 +289,7 @@ class TCNFrameInferencer:
 
             if tid not in self.tracks:
                 self.tracks[tid] = TrackState(buf_size=self.buf_size)
-            self.tracks[tid].buffer.append(kp_norm)
+            self.tracks[tid].push(kp_norm, timestamp)
 
             kp_px = keypoints[det_idx][:17]
             update_track_from_keypoints(self.tracks[tid], kp_px, det_centers[det_idx], self.frame_count)
@@ -304,6 +310,7 @@ class TCNFrameInferencer:
                 self.num_classes,
                 self.device,
                 num_joints=self.num_joints,
+                window_sec=self.window_sec,
             )
             for tid, (pred_cls, pred_conf, pred_probs) in pred_map.items():
                 self.tracks[tid].pred_cls = pred_cls

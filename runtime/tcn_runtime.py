@@ -38,11 +38,30 @@ def normalize_frame(kp, sc, min_score=0.3):
     return kp
 
 
-def buffer_to_tensor(frame_buffer, max_frames, device, num_joints=65):
+def buffer_to_tensor(frame_buffer, max_frames, device, num_joints=65,
+                     timestamps=None, window_sec=None):
     t_len = len(frame_buffer)
     input_dim = num_joints * 2
-    arr = np.stack(list(frame_buffer), axis=0)
+    arr = np.stack(list(frame_buffer), axis=0)  # (N, V, 2)
 
+    # ── 시간 기반 리샘플: 최근 window_sec초를 max_frames로 균등 보간 ──
+    # fps가 변해도 모델 입력의 "시간폭"이 일정해져, 사람이 많아 fps가 떨어져도
+    # 동적 동작(wave)의 주기가 왜곡되지 않는다. (timestamps 없으면 기존 동작)
+    if timestamps is not None and window_sec and t_len >= 2 and len(timestamps) == t_len:
+        ts = np.asarray(timestamps, dtype=np.float64)
+        now = ts[-1]
+        t_grid = np.linspace(now - float(window_sec), now, max_frames)
+        flat = arr.reshape(t_len, -1)  # (N, V*2)
+        out = np.zeros((max_frames, flat.shape[1]), dtype=np.float32)
+        valid = t_grid >= ts[0]  # 버퍼 시작 이전 구간은 0 + mask=0 (학습 패딩과 동일)
+        if valid.any():
+            for c in range(flat.shape[1]):
+                out[valid, c] = np.interp(t_grid[valid], ts, flat[:, c])
+        features = torch.tensor(out.T, dtype=torch.float32).unsqueeze(0).to(device)
+        mask = torch.tensor(valid.astype(np.float32), dtype=torch.float32).unsqueeze(0).to(device)
+        return features, mask
+
+    # ── 기존 프레임 기반 리샘플 (하위호환: 이미지 모드 / timestamps 없는 경로) ──
     if t_len >= max_frames:
         indices = np.linspace(0, t_len - 1, max_frames, dtype=int)
         arr = arr[indices]
@@ -60,11 +79,14 @@ def buffer_to_tensor(frame_buffer, max_frames, device, num_joints=65):
     return features, mask
 
 
-def buffers_to_batch_tensors(frame_buffers, max_frames, device, num_joints=65):
+def buffers_to_batch_tensors(frame_buffers, max_frames, device, num_joints=65,
+                             timestamps_list=None, window_sec=None):
     feature_list = []
     mask_list = []
-    for frame_buffer in frame_buffers:
-        feat, mask = buffer_to_tensor(frame_buffer, max_frames, device, num_joints)
+    for i, frame_buffer in enumerate(frame_buffers):
+        ts = timestamps_list[i] if timestamps_list is not None else None
+        feat, mask = buffer_to_tensor(frame_buffer, max_frames, device, num_joints,
+                                      timestamps=ts, window_sec=window_sec)
         feature_list.append(feat)
         mask_list.append(mask)
     return torch.cat(feature_list, dim=0), torch.cat(mask_list, dim=0)
@@ -132,13 +154,20 @@ def predict_tcn(model, frame_buffer, max_frames, num_classes, device, num_joints
 
 
 @torch.no_grad()
-def predict_tcn_batch(model, track_items, max_frames, num_classes, device, num_joints=65):
+def predict_tcn_batch(model, track_items, max_frames, num_classes, device, num_joints=65,
+                      window_sec=None):
     valid = [(tid, tr) for tid, tr in track_items if len(tr.buffer) >= 5]
     if not valid:
         return {}
 
     buffers = [tr.buffer for _, tr in valid]
-    features, mask = buffers_to_batch_tensors(buffers, max_frames, device, num_joints)
+    timestamps_list = (
+        [list(getattr(tr, "timestamps", [])) for _, tr in valid] if window_sec else None
+    )
+    features, mask = buffers_to_batch_tensors(
+        buffers, max_frames, device, num_joints,
+        timestamps_list=timestamps_list, window_sec=window_sec,
+    )
     logits = model(features, mask)
     probs_batch = torch.softmax(logits, dim=1).detach().cpu().numpy()
 

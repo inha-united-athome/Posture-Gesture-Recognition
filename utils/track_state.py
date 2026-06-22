@@ -6,7 +6,9 @@ class TrackState:
     """Per-person state container shared by inference pipelines."""
 
     def __init__(self, buf_size=0):
-        self.buffer = deque(maxlen=max(1, int(buf_size)))
+        maxlen = max(1, int(buf_size))
+        self.buffer = deque(maxlen=maxlen)
+        self.timestamps = deque(maxlen=maxlen)  # buffer와 1:1 대응하는 프레임 캡처 시각(초)
         self.pred_cls = "unknown"
         self.pred_conf = 0.0
         self.pred_probs = {}
@@ -17,6 +19,15 @@ class TrackState:
         self.last_bbox = None  # (x_min, y_min, x_max, y_max)
         self.bbox_wh = None    # (width, height)
         self.bbox_area = 0.0
+
+    def push(self, kp, timestamp):
+        """프레임 keypoint와 캡처 시각을 함께 버퍼에 추가 (시간 기반 리샘플용).
+
+        buffer.append만 쓰면 timestamps가 비어 시간 리샘플이 비활성화되니,
+        실시간 경로에서는 항상 이 메서드로 추가한다.
+        """
+        self.buffer.append(kp)
+        self.timestamps.append(float(timestamp))
 
     def to_dict(self):
         return {

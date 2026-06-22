@@ -170,6 +170,8 @@ class GestureDetectNode(Node):
         self.declare_parameter('track_match_distance', 120)
         self.declare_parameter('mode', 'balanced')
         self.declare_parameter('max_persons_inference', 8)
+        self.declare_parameter('infer_every', 5)
+        self.declare_parameter('window_sec', 2.0)
 
         # ROS2 Parameters
         self.declare_parameter('package_name', 'Posture_and_Gesture')
@@ -192,6 +194,8 @@ class GestureDetectNode(Node):
         self.track_match_distance = self.get_parameter('track_match_distance').get_parameter_value().integer_value
         self.mode = self.get_parameter('mode').get_parameter_value().string_value
         self.max_persons_inference = self.get_parameter('max_persons_inference').get_parameter_value().integer_value
+        self.infer_every = self.get_parameter('infer_every').get_parameter_value().integer_value
+        self.window_sec = self.get_parameter('window_sec').get_parameter_value().double_value
 
         valid_modes = {'performance', 'balanced', 'lightweight'}
         if self.mode not in valid_modes:
@@ -294,6 +298,14 @@ class GestureDetectNode(Node):
             max_frames=checkpoint.get("max_frames", 120),
             num_joints=checkpoint.get("num_joints", 65),
             pose_device=str(self.device),
+            mode=self.mode,
+            det_frequency=self.det_frequency,
+            buf_size=self.buffer_size,
+            infer_every=self.infer_every,
+            max_tracks_infer=self.max_persons_inference,
+            track_match_dist=float(self.track_match_distance),
+            ttl_frames=self.track_ttl,
+            window_sec=self.window_sec,
             class_colors=CLASS_COLORS,
         )
         
