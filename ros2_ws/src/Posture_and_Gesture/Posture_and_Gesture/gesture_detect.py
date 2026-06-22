@@ -43,6 +43,7 @@ import rclpy
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import Image, CompressedImage
 from inha_interfaces.srv import GestureDetection
+from std_srvs.srv import SetBool
 from vision_msgs.msg import BoundingBox2D, Detection2D, Detection2DArray, ObjectHypothesisWithPose
 from Posture_and_Gesture.image_msg_utils import bgr8_to_jpeg_compressed_image
 
@@ -181,6 +182,8 @@ class GestureDetectNode(Node):
         self.declare_parameter('action_image_log_enabled', True)
         self.declare_parameter('action_image_log_root_dir', '/home/thor/inha_log/module/posture_and_gesture/gesture_detection_logs')
         self.declare_parameter('action_image_log_period_sec', 1.0)
+        self.declare_parameter('recorder_enable_service', '/action_recorder/set_recording')
+        self.declare_parameter('recorder_trigger_enabled', True)
 
         self.device = self.get_parameter('device').get_parameter_value().string_value
         self.det_frequency = self.get_parameter('det_frequency').get_parameter_value().integer_value
@@ -217,6 +220,12 @@ class GestureDetectNode(Node):
             0.0,
             self.get_parameter('action_image_log_period_sec').get_parameter_value().double_value,
         )
+        self.recorder_enable_service = (
+            self.get_parameter('recorder_enable_service').get_parameter_value().string_value
+        )
+        self.recorder_trigger_enabled = (
+            self.get_parameter('recorder_trigger_enabled').get_parameter_value().bool_value
+        )
 
         self.get_logger().info(
             f"""PostureDetectNode initialized with device={self.device},
@@ -244,6 +253,12 @@ class GestureDetectNode(Node):
             'gesture_detection_service',
             self.gesture_detection_callback
         )
+
+        self.recorder_client = None
+        if self.recorder_trigger_enabled:
+            self.recorder_client = self.create_client(
+                SetBool, self.recorder_enable_service
+            )
 
         self.get_logger().info(
             f"""Subscribing to {self.input_topic} 
@@ -288,8 +303,8 @@ class GestureDetectNode(Node):
         self._action_image_log_dir = None
         self._last_action_image_log_time = 0.0
         self._action_image_log_index = 0
-        
-        
+
+
     def start_subscription(self):
         self.sub = self.create_subscription(
             CompressedImage if self.image_transport == 'compressed' else Image,
@@ -310,7 +325,6 @@ class GestureDetectNode(Node):
                 return
         else:
             frame = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
-        
 
         # Inference Posture with MLP
         result = self.inferencer.infer(frame, return_debug_image=True)
@@ -398,6 +412,7 @@ class GestureDetectNode(Node):
             self._action_active = True
             self._open_action_image_log()
             self.start_subscription()
+            self._trigger_recorder(True)
 
     def _stop_action(self):
         if self._action_active:
@@ -406,6 +421,30 @@ class GestureDetectNode(Node):
             self.target_class = []
             self.destroy_subscription(self.sub)
             self._close_action_image_log()
+            self._trigger_recorder(False)
+
+    def _trigger_recorder(self, enable):
+        if self.recorder_client is None:
+            return
+        if not self.recorder_client.service_is_ready():
+            self.get_logger().warn(
+                f"Recorder service '{self.recorder_enable_service}' not available; "
+                f"skipping {'start' if enable else 'stop'} signal."
+            )
+            return
+        request = SetBool.Request()
+        request.data = bool(enable)
+        future = self.recorder_client.call_async(request)
+        future.add_done_callback(self._recorder_response_callback)
+
+    def _recorder_response_callback(self, future):
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"Recorder service call failed: {exc}")
+            return
+        if not response.success:
+            self.get_logger().warn(f"Recorder rejected request: {response.message}")
 
     def _open_action_image_log(self):
         self._action_image_log_dir = None
