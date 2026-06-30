@@ -13,6 +13,7 @@ def init_pose_tracker(
     det_frequency=1,
     tracking=False,
     return_track_ids=False,
+    max_bboxes=0,
 ):
     sys.path.insert(0, rtmlib_path)
     from rtmlib import PoseTracker, Wholebody
@@ -26,6 +27,7 @@ def init_pose_tracker(
         device=device,
         tracking=tracking,
         return_track_ids=return_track_ids,
+        max_bboxes=max_bboxes,
     )
 
 

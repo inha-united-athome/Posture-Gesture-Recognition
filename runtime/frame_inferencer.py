@@ -89,6 +89,7 @@ class MLPFrameInferencer:
             det_frequency=det_frequency,
             tracking=False,
             return_track_ids=False,
+            max_bboxes=self.max_persons_infer,
         )
 
         self.frame_count = 0
@@ -241,6 +242,7 @@ class TCNFrameInferencer:
             det_frequency=det_frequency,
             tracking=False,
             return_track_ids=False,
+            max_bboxes=self.max_tracks_infer,
         )
 
         self.frame_count = 0

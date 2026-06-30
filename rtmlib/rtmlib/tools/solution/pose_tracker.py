@@ -145,7 +145,8 @@ class PoseTracker:
                  to_openpose: bool = False,
                  backend: str = 'onnxruntime',
                  device: str = 'cpu',
-                 return_track_ids: bool = False):
+                 return_track_ids: bool = False,
+                 max_bboxes: int = 0):
 
         model = solution(mode=mode,
                          to_openpose=to_openpose,
@@ -170,6 +171,10 @@ class PoseTracker:
         self.tracking = tracking
         self.tracking_thr = tracking_thr
         self.return_track_ids = return_track_ids
+        # Cap how many person bboxes are fed to the (top-down) pose model per
+        # frame. RTMPose runs one inference per bbox, so an uncapped crowd of
+        # 40+ people means 40+ sequential pose inferences. 0 == unlimited.
+        self.max_bboxes = max(0, int(max_bboxes))
         self.reset()
 
         if self.tracking:
@@ -205,6 +210,8 @@ class PoseTracker:
                     return [], []
             else:
                 bboxes = self.bboxes_last_frame
+
+            bboxes = self._limit_bboxes(bboxes)
 
             if pose_model_name == 'RTMPose3d':
                 keypoints, scores, keypoints_simcc, keypoints2d = self.pose_model(
@@ -269,6 +276,23 @@ class PoseTracker:
             return keypoints, scores, self.track_ids_last_frame
 
         return keypoints, scores
+
+    def _limit_bboxes(self, bboxes):
+        """Keep only the ``max_bboxes`` largest person boxes (by area).
+
+        Largest area is used as a proxy for "closest / most relevant person",
+        which keeps the people the robot is actually interacting with while
+        dropping distant bystanders before the expensive pose stage.
+        """
+        if not self.max_bboxes or len(bboxes) <= self.max_bboxes:
+            return bboxes
+
+        arr = np.asarray(bboxes, dtype=np.float32)
+        areas = (arr[:, 2] - arr[:, 0]) * (arr[:, 3] - arr[:, 1])
+        keep = np.argsort(areas)[::-1][:self.max_bboxes]
+        if isinstance(bboxes, np.ndarray):
+            return bboxes[keep]
+        return [bboxes[i] for i in keep]
 
     def track_by_iou(self, bbox):
         """Get track id using IoU tracking greedily.
